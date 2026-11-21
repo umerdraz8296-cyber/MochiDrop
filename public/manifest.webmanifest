@@ -1,0 +1,17 @@
+{
+  "name": "Plexo Download Manager",
+  "short_name": "Plexo",
+  "description": "Multi-network download manager and browser video grabber with pure black-and-white dark mode.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [
+    {
+      "src": "/plexo-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

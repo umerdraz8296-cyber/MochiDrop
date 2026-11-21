@@ -1,0 +1,6 @@
+{
+  "name": "Plexo",
+  "description": "Multi-network download manager and browser video extension featuring monochrome black-and-white dark mode, multi-language track selection, and direct link capture.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

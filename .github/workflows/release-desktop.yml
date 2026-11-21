@@ -1,0 +1,90 @@
+name: Build & Release PC Desktop Installer
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version tag (e.g. 1.0.0)'
+        required: false
+        default: '1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-desktop:
+    name: Build ${{ matrix.os }} Installer
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install app dependencies
+        run: npm install
+
+      - name: Build MochiDrop frontend & server bundle
+        run: |
+          npm run build
+          npm run build:server
+
+      - name: Install desktop packager (Electron + electron-builder)
+        run: npm install --no-save electron@33 electron-builder@25
+
+      - name: Set release version
+        shell: bash
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG_VER="${{ github.event.inputs.version }}"
+          fi
+          if [[ -z "$TAG_VER" || "$TAG_VER" == "main" || "$TAG_VER" == "master" ]]; then
+            TAG_VER="1.0.0"
+          fi
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version='$TAG_VER';fs.writeFileSync('package.json',JSON.stringify(p,null,2));"
+
+      - name: Package native PC installer
+        run: npx electron-builder --config electron-builder.json --publish never
+
+      - name: Upload installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mochidrop-${{ matrix.os }}
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.AppImage
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-desktop
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all built installers
+        uses: actions/download-artifact@v4
+        with:
+          path: all-installers
+          merge-multiple: true
+
+      - name: Create GitHub Release with PC installers
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', github.event.inputs.version || '1.0.0') || github.ref_name }}
+          name: MochiDrop Desktop ${{ github.event_name == 'workflow_dispatch' && format('v{0}', github.event.inputs.version || '1.0.0') || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            all-installers/*.exe
+            all-installers/*.dmg
+            all-installers/*.AppImage

@@ -24,7 +24,9 @@ const MAX_ACTIVE_TRANSFERS = 12;
 const TRANSFER_RETENTION_MS = 60 * 60 * 1000; // 1 hour
 const SLICE_SIZE = 64 * 1024; // 64 KB slices for responsive pause & accurate real speed
 const MAX_HTML_INSPECT_BYTES = 256 * 1024;
-const DOWNLOADS_DIR = path.resolve(process.cwd(), '.mochidrop-downloads');
+const DOWNLOADS_DIR = process.env.MOCHIDROP_DATA_DIR
+  ? path.resolve(process.env.MOCHIDROP_DATA_DIR)
+  : path.resolve(process.cwd(), '.mochidrop-downloads');
 
 try {
   fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });

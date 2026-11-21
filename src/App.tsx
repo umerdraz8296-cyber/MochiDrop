@@ -5,7 +5,6 @@ import {
   Menu,
   Moon,
   Network,
-  Puzzle,
   Settings,
   Sun,
   X,
@@ -30,7 +29,6 @@ import {
 import { formatSpeedMBps } from './utils/format';
 import { DownloadsView } from './components/DownloadsView';
 import { NetworksView } from './components/NetworksView';
-import { ExtensionView } from './components/ExtensionView';
 import { SettingsView } from './components/SettingsView';
 
 const BRAND_NAME = 'MochiDrop';
@@ -42,7 +40,6 @@ const NAV_ITEMS: Array<{
 }> = [
   { id: 'downloads', label: 'Downloads', icon: ArrowDownToLine },
   { id: 'networks', label: 'Networks', icon: Network },
-  { id: 'extension', label: 'Browser Extension', icon: Puzzle },
   { id: 'settings', label: 'Settings & Plugins', icon: Settings },
 ];
 
@@ -1185,7 +1182,6 @@ export default function App() {
                     }}
                     onToggleAdapter={handleToggleAdapter}
                     onNotify={notify}
-                    onOpenExtensionView={() => setActiveTab('extension')}
                     onOpenNetworksView={() => setActiveTab('networks')}
                   />
                 )}
@@ -1222,14 +1218,6 @@ export default function App() {
                       notify(`Added ${name}`);
                     }}
                     onUpdateSettings={(patch) => setSettings((prev) => ({ ...prev, ...patch }))}
-                  />
-                )}
-
-                {activeTab === 'extension' && (
-                  <ExtensionView
-                    settings={settings}
-                    onUpdateSettings={(patch) => setSettings((prev) => ({ ...prev, ...patch }))}
-                    onNotify={notify}
                   />
                 )}
 

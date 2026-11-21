@@ -1,0 +1,47 @@
+{
+  "appId": "com.mochidrop.desktop",
+  "productName": "MochiDrop",
+  "asar": false,
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "electron/**/*",
+    "dist/**/*",
+    "node_modules/**/*",
+    "package.json"
+  ],
+  "extraMetadata": {
+    "main": "electron/main.cjs"
+  },
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      },
+      {
+        "target": "portable",
+        "arch": ["x64"]
+      }
+    ],
+    "artifactName": "MochiDrop-${version}-${target}.exe"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "MochiDrop"
+  },
+  "mac": {
+    "category": "public.app-category.utilities",
+    "target": ["dmg"],
+    "artifactName": "MochiDrop-${version}-${arch}.dmg"
+  },
+  "linux": {
+    "category": "Network",
+    "target": ["AppImage"],
+    "artifactName": "MochiDrop-${version}.AppImage"
+  }
+}

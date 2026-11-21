@@ -7,6 +7,8 @@
     "dev": "tsx server.ts",
     "start": "node server.ts",
     "build": "vite build",
+    "build:server": "esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/server.mjs",
+    "build:extension": "tsx scripts/export-extension.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"

@@ -1,4 +1,4 @@
-export type WorkspaceTab = 'downloads' | 'networks' | 'extension' | 'settings';
+export type WorkspaceTab = 'downloads' | 'networks' | 'settings';
 
 export type DownloadStatus =
   | 'connecting'

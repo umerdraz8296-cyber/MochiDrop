@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -846,22 +848,50 @@ async function startServer() {
     res.json({ items, serverTime: Date.now() });
   });
 
+  function isAuthorizedOwnerExtensionRequest(req: express.Request): boolean {
+    const configuredKey = process.env.MOCHIDROP_OWNER_KEY?.trim() || '';
+    // Fail closed: unless the owner explicitly sets a strong private key in .env, never serve the extension over HTTP.
+    if (configuredKey.length < 12) return false;
+    const headerVal = req.headers['x-mochidrop-owner-key'];
+    const provided =
+      (typeof headerVal === 'string' ? headerVal : Array.isArray(headerVal) ? headerVal[0] : '') ||
+      (typeof req.query.key === 'string' ? req.query.key : '');
+    if (!provided) return false;
+    const expectedBuf = Buffer.from(configuredKey, 'utf8');
+    const providedBuf = Buffer.from(provided.trim(), 'utf8');
+    if (expectedBuf.length !== providedBuf.length) return false;
+    return crypto.timingSafeEqual(expectedBuf, providedBuf);
+  }
+
+  // Owner-only private endpoints (returns 404 for all public users)
   app.get('/api/extension/files', (req, res) => {
+    if (!isAuthorizedOwnerExtensionRequest(req)) {
+      res.status(404).json({ error: 'Not found.' });
+      return;
+    }
     const origin = resolveAppOrigin(req);
     const files = generateExtensionFiles({ plexoOrigin: origin, name: 'MochiDrop' });
     res.json({ origin, files });
   });
 
   app.get('/api/extension/download', (req, res) => {
-    const origin = resolveAppOrigin(req);
+    if (!isAuthorizedOwnerExtensionRequest(req)) {
+      res.status(404).json({ error: 'Not found.' });
+      return;
+    }
+    const customOrigin =
+      typeof req.query.origin === 'string' && /^https?:\/\//i.test(req.query.origin.trim())
+        ? req.query.origin.trim().replace(/\/+$/, '')
+        : resolveAppOrigin(req);
     const { filename, buffer } = buildStoreReadyExtensionZip({
-      plexoOrigin: origin,
+      plexoOrigin: customOrigin,
       name: 'MochiDrop',
     });
 
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', String(buffer.length));
+    res.setHeader('Cache-Control', 'no-store');
     res.send(buffer);
   });
 
@@ -873,14 +903,16 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distDir = path.resolve(__dirname, 'dist');
+    const distDir = fs.existsSync(path.join(__dirname, 'index.html'))
+      ? __dirname
+      : path.resolve(__dirname, 'dist');
     app.use(express.static(distDir));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distDir, 'index.html'));
     });
   }
 
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT || 3000) || 3000;
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${PORT}`);
   });

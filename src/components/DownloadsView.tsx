@@ -89,7 +89,6 @@ interface DownloadsViewProps {
   onUpdateTrack: (id: string, quality: string, language: string) => void;
   onToggleAdapter: (id: string) => void;
   onNotify: (msg: string) => void;
-  onOpenExtensionView: () => void;
   onOpenNetworksView: () => void;
 }
 
@@ -117,7 +116,6 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
   onUpdateTrack,
   onToggleAdapter,
   onNotify,
-  onOpenExtensionView,
   onOpenNetworksView,
 }) => {
   const [filter, setFilter] = useState<FilterKey>('all');
@@ -844,14 +842,6 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                   </button>
                 )}
               </div>
-
-              <button
-                type="button"
-                onClick={onOpenExtensionView}
-                className="text-neutral-700 dark:text-neutral-300 underline underline-offset-4 hover:text-black dark:hover:text-white whitespace-nowrap cursor-pointer"
-              >
-                Browser Extension
-              </button>
             </div>
           </form>
 
@@ -1232,10 +1222,11 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
               {downloads.length === 0 ? (
                 <button
                   type="button"
-                  onClick={onOpenExtensionView}
-                  className="h-9 px-4 rounded-xs bg-black text-white dark:bg-white dark:text-black text-xs font-semibold hover:bg-neutral-800 dark:hover:bg-neutral-200 active:scale-[0.98] transition-all cursor-pointer"
+                  onClick={handlePasteFromClipboard}
+                  className="h-9 px-4 rounded-xs bg-black text-white dark:bg-white dark:text-black text-xs font-semibold hover:bg-neutral-800 dark:hover:bg-neutral-200 active:scale-[0.98] transition-all inline-flex items-center gap-1.5 cursor-pointer"
                 >
-                  Open Browser Extension
+                  <Clipboard className="h-3.5 w-3.5" />
+                  Paste Link from Clipboard
                 </button>
               ) : (
                 <button

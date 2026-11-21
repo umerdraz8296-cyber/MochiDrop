@@ -1,6 +1,7 @@
 {
   "appId": "com.mochidrop.desktop",
   "productName": "MochiDrop",
+  "electronVersion": "33.3.1",
   "asar": false,
   "directories": {
     "output": "release"
@@ -8,12 +9,15 @@
   "files": [
     "electron/**/*",
     "dist/**/*",
+    "package.json",
     "node_modules/**/*",
-    "package.json"
+    "!node_modules/electron{,/**}",
+    "!node_modules/electron-builder{,/**}",
+    "!node_modules/esbuild{,/**}",
+    "!node_modules/typescript{,/**}",
+    "!node_modules/vite{,/**}",
+    "!node_modules/@esbuild{,/**}"
   ],
-  "extraMetadata": {
-    "main": "electron/main.cjs"
-  },
   "win": {
     "target": [
       {
@@ -36,7 +40,13 @@
   },
   "mac": {
     "category": "public.app-category.utilities",
-    "target": ["dmg"],
+    "identity": null,
+    "target": [
+      {
+        "target": "dmg",
+        "arch": ["arm64", "x64"]
+      }
+    ],
     "artifactName": "MochiDrop-${version}-${arch}.dmg"
   },
   "linux": {

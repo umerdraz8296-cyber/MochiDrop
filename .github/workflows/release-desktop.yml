@@ -2,21 +2,50 @@ name: Build & Release PC Desktop Installer
 
 on:
   push:
+    branches:
+      - main
+      - master
     tags:
       - 'v*'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version tag (e.g. 1.0.0)'
+        description: 'Release version (e.g. 1.0.0)'
         required: false
         default: '1.0.0'
 
 permissions:
   contents: write
 
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  compute-version:
+    name: Determine Release Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+    steps:
+      - id: ver
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.version }}" ]]; then
+            VER="${{ github.event.inputs.version }}"
+            VER="${VER#v}"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            VER="1.0.${{ github.run_number }}"
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
+
   build-desktop:
     name: Build ${{ matrix.os }} Installer
+    needs: compute-version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -40,28 +69,35 @@ jobs:
           npm run build
           npm run build:server
 
-      - name: Install desktop packager (Electron + electron-builder)
-        run: npm install --no-save electron@33 electron-builder@25
-
-      - name: Set release version
+      - name: Configure desktop metadata in package.json
         shell: bash
+        env:
+          RELEASE_VER: ${{ needs.compute-version.outputs.version }}
         run: |
-          TAG_VER="${GITHUB_REF_NAME#v}"
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            TAG_VER="${{ github.event.inputs.version }}"
-          fi
-          if [[ -z "$TAG_VER" || "$TAG_VER" == "main" || "$TAG_VER" == "master" ]]; then
-            TAG_VER="1.0.0"
-          fi
-          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version='$TAG_VER';fs.writeFileSync('package.json',JSON.stringify(p,null,2));"
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.name = "mochidrop";
+            pkg.version = process.env.RELEASE_VER || "1.0.0";
+            pkg.description = "MochiDrop Desktop Download Manager and Media Streamer";
+            pkg.author = "MochiDrop";
+            pkg.main = "electron/main.cjs";
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2));
+          '
+
+      - name: Install Electron desktop packager
+        run: npm install --save-dev electron@33.3.1 electron-builder@25.1.8
 
       - name: Package native PC installer
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npx electron-builder --config electron-builder.json --publish never
 
       - name: Upload installer artifacts
         uses: actions/upload-artifact@v4
         with:
           name: mochidrop-${{ matrix.os }}
+          if-no-files-found: error
           path: |
             release/*.exe
             release/*.dmg
@@ -69,7 +105,8 @@ jobs:
 
   publish-release:
     name: Publish GitHub Release
-    needs: build-desktop
+    needs: [compute-version, build-desktop]
+    if: always() && needs.compute-version.result == 'success' && (needs.build-desktop.result == 'success' || needs.build-desktop.result == 'failure')
     runs-on: ubuntu-latest
     steps:
       - name: Download all built installers
@@ -78,12 +115,19 @@ jobs:
           path: all-installers
           merge-multiple: true
 
+      - name: Verify at least one installer was built
+        run: |
+          ls -lh all-installers
+          test -n "$(ls -A all-installers)"
+
       - name: Create GitHub Release with PC installers
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', github.event.inputs.version || '1.0.0') || github.ref_name }}
-          name: MochiDrop Desktop ${{ github.event_name == 'workflow_dispatch' && format('v{0}', github.event.inputs.version || '1.0.0') || github.ref_name }}
+          tag_name: ${{ needs.compute-version.outputs.tag }}
+          name: MochiDrop Desktop ${{ needs.compute-version.outputs.tag }}
+          make_latest: true
           generate_release_notes: true
+          fail_on_unmatched_files: false
           files: |
             all-installers/*.exe
             all-installers/*.dmg

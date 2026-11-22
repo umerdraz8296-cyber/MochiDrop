@@ -9,14 +9,7 @@
   "files": [
     "electron/**/*",
     "dist/**/*",
-    "package.json",
-    "node_modules/**/*",
-    "!node_modules/electron{,/**}",
-    "!node_modules/electron-builder{,/**}",
-    "!node_modules/esbuild{,/**}",
-    "!node_modules/typescript{,/**}",
-    "!node_modules/vite{,/**}",
-    "!node_modules/@esbuild{,/**}"
+    "package.json"
   ],
   "win": {
     "target": [

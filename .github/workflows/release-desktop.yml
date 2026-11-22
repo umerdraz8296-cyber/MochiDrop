@@ -54,15 +54,15 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install app dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
 
       - name: Build MochiDrop frontend & server bundle
         run: |
@@ -86,7 +86,7 @@ jobs:
           '
 
       - name: Install Electron desktop packager
-        run: npm install --save-dev electron@33.3.1 electron-builder@25.1.8
+        run: npm install --legacy-peer-deps --save-dev electron@33.3.1 electron-builder@25.1.8
 
       - name: Package native PC installer
         env:
@@ -94,7 +94,7 @@ jobs:
         run: npx electron-builder --config electron-builder.json --publish never
 
       - name: Upload installer artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mochidrop-${{ matrix.os }}
           if-no-files-found: error
@@ -110,18 +110,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all built installers
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: all-installers
           merge-multiple: true
 
       - name: Verify at least one installer was built
         run: |
+          mkdir -p all-installers
           ls -lh all-installers
           test -n "$(ls -A all-installers)"
 
       - name: Create GitHub Release with PC installers
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.compute-version.outputs.tag }}
           name: MochiDrop Desktop ${{ needs.compute-version.outputs.tag }}

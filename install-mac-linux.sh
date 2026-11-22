@@ -12,7 +12,7 @@ fi
 
 if [ ! -d "node_modules" ]; then
   echo "Installing dependencies..."
-  npm install
+  npm install --legacy-peer-deps
 fi
 
 echo "Building MochiDrop..."

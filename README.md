@@ -8,9 +8,9 @@ Anyone can install **MochiDrop** directly on their computer from **GitHub Releas
 
 1. Open the **Releases** section on the right sidebar of this GitHub repository.
 2. Download the installer for your operating system:
-   - **Windows**: `MochiDrop-1.0.0-nsis.exe` (full installer with Start Menu & Desktop shortcut) or `MochiDrop-1.0.0-portable.exe` (no install needed)
-   - **macOS**: `MochiDrop-1.0.0-x64.dmg` / `arm64.dmg`
-   - **Linux**: `MochiDrop-1.0.0.AppImage`
+   - **Windows**: `MochiDrop-*-Setup.exe` (full installer with Start Menu & Desktop shortcut) or `MochiDrop-*-Portable.exe` (no install needed)
+   - **macOS**: `MochiDrop-*-arm64.dmg` / `MochiDrop-*-x64.dmg`
+   - **Linux**: `MochiDrop-*.AppImage`
 3. Run the installer and launch **MochiDrop**.
 
 > **How to publish a new PC installer release (for repo owner):**

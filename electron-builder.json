@@ -21,15 +21,18 @@
         "target": "portable",
         "arch": ["x64"]
       }
-    ],
-    "artifactName": "MochiDrop-${version}-${target}.exe"
+    ]
   },
   "nsis": {
+    "artifactName": "MochiDrop-${version}-Setup.${ext}",
     "oneClick": false,
     "allowToChangeInstallationDirectory": true,
     "createDesktopShortcut": true,
     "createStartMenuShortcut": true,
     "shortcutName": "MochiDrop"
+  },
+  "portable": {
+    "artifactName": "MochiDrop-${version}-Portable.${ext}"
   },
   "mac": {
     "category": "public.app-category.utilities",
@@ -40,11 +43,11 @@
         "arch": ["arm64", "x64"]
       }
     ],
-    "artifactName": "MochiDrop-${version}-${arch}.dmg"
+    "artifactName": "MochiDrop-${version}-${arch}.${ext}"
   },
   "linux": {
     "category": "Network",
     "target": ["AppImage"],
-    "artifactName": "MochiDrop-${version}.AppImage"
+    "artifactName": "MochiDrop-${version}.${ext}"
   }
 }

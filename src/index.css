@@ -17,13 +17,13 @@
   }
 
   body {
-    background-color: #f8f8f8;
-    color: #0a0a0a;
+    background-color: #f3f6f4;
+    color: #111b16;
   }
 
   .dark body {
-    background-color: #050505;
-    color: #f5f5f5;
+    background-color: #060908;
+    color: #f4f8f6;
     letter-spacing: 0.008em;
   }
 
@@ -41,12 +41,34 @@
   input:focus-visible,
   select:focus-visible,
   textarea:focus-visible {
-    outline: 1.5px solid currentColor;
+    outline: 2px solid #2fd48b;
     outline-offset: 2px;
   }
 }
 
-/* Monochrome luxury scrollbars */
+/* Signature Obsidian Dot-Matrix + Ambient Emerald Glass Canvas */
+.mochi-canvas {
+  background-color: #f3f6f4;
+  background-image:
+    radial-gradient(rgba(16, 40, 30, 0.08) 1.2px, transparent 1.2px),
+    radial-gradient(ellipse 60% 50% at 12% 38%, rgba(28, 138, 94, 0.09), transparent 72%),
+    radial-gradient(ellipse 50% 45% at 88% 12%, rgba(47, 212, 139, 0.07), transparent 68%);
+  background-size: 24px 24px, 100% 100%, 100% 100%;
+  background-attachment: fixed;
+}
+
+.dark .mochi-canvas {
+  background-color: #060908;
+  background-image:
+    radial-gradient(rgba(255, 255, 255, 0.085) 1.25px, transparent 1.25px),
+    radial-gradient(ellipse 62% 52% at 10% 42%, rgba(22, 140, 92, 0.19), transparent 68%),
+    radial-gradient(ellipse 48% 42% at 86% 14%, rgba(34, 197, 126, 0.08), transparent 66%),
+    radial-gradient(ellipse 55% 40% at 50% 100%, rgba(16, 102, 68, 0.1), transparent 70%);
+  background-size: 24px 24px, 100% 100%, 100% 100%, 100% 100%;
+  background-attachment: fixed;
+}
+
+/* Emerald-tinted studio scrollbars */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -57,12 +79,12 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(115, 115, 115, 0.28);
-  border-radius: 3px;
+  background: rgba(47, 212, 139, 0.22);
+  border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(163, 163, 163, 0.55);
+  background: rgba(47, 212, 139, 0.45);
 }
 
 @media (prefers-reduced-motion: reduce) {

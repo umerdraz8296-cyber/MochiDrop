@@ -15,16 +15,17 @@ import {
   sniffInitialBytes,
 } from './urlParser.ts';
 import { inferPlayableMimeType } from './mediaPlayer.ts';
+import { isYouTubeVideoUrl, startYouTubeBackgroundTransfer } from './youtubeEngine.ts';
 
 const BROWSER_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 const MAX_REDIRECTS = 12;
-const MAX_ACTIVE_TRANSFERS = 12;
+const MAX_ACTIVE_TRANSFERS = 24;
 const TRANSFER_RETENTION_MS = 60 * 60 * 1000; // 1 hour
 const SLICE_SIZE = 64 * 1024; // 64 KB slices for responsive pause & accurate real speed
 const MAX_HTML_INSPECT_BYTES = 256 * 1024;
-const DOWNLOADS_DIR = process.env.MOCHIDROP_DATA_DIR
+export const DOWNLOADS_DIR = process.env.MOCHIDROP_DATA_DIR
   ? path.resolve(process.env.MOCHIDROP_DATA_DIR)
   : path.resolve(process.cwd(), '.mochidrop-downloads');
 
@@ -752,7 +753,7 @@ function pruneOldTransfers() {
   }
 }
 
-function recordBytesSent(rec: TransferRecord, bytes: number) {
+export function recordBytesSent(rec: TransferRecord, bytes: number) {
   const now = Date.now();
   rec.downloadedBytes += bytes;
   rec.updatedAt = now;
@@ -792,16 +793,16 @@ function refreshIdleSpeed(rec: TransferRecord) {
   }
 }
 
-function updateChunkMapFromProgress(
+export function updateChunkMapFromProgress(
   rec: TransferRecord,
   inFlightMap?: Map<number, { start: number; end: number; received: number; workerIndex: number }>
 ) {
-  const SLOTS = 24;
+  const SLOTS = 32;
   if (rec.totalBytes <= 0) {
     const filled =
       rec.status === 'completed'
         ? SLOTS
-        : Math.min(SLOTS - 1, Math.floor(rec.downloadedBytes / (2 * 1024 * 1024)) % SLOTS);
+        : Math.min(SLOTS - 1, Math.floor(rec.downloadedBytes / (1024 * 1024)) % SLOTS);
     rec.chunks = Array.from({ length: SLOTS }, (_, idx) => ({
       index: idx,
       progress: rec.status === 'completed' ? 100 : idx < filled ? 100 : idx === filled ? 50 : 0,
@@ -816,39 +817,51 @@ function updateChunkMapFromProgress(
     const slotEnd = (idx + 1) * slotBytes;
 
     let pct = 0;
-    if (rec.downloadedBytes >= slotEnd || rec.status === 'completed') {
+    if (rec.status === 'completed') {
       pct = 100;
-    } else if (rec.downloadedBytes > slotStart) {
-      pct = Math.min(100, Math.round(((rec.downloadedBytes - slotStart) / slotBytes) * 100));
-    }
-
-    let workerIndex = idx % Math.max(1, rec.parallelStreams);
-
-    if (pct < 100 && inFlightMap && inFlightMap.size > 0) {
+    } else if (inFlightMap && inFlightMap.size > 0) {
+      // When true parallel byte-range workers are active, reflect per-segment progress accurately
+      let coveredBytes = 0;
+      let workerIndex = idx % Math.max(1, rec.parallelStreams);
       for (const info of inFlightMap.values()) {
         const chunkLoadedEnd = info.start + info.received;
         if (chunkLoadedEnd > slotStart && info.start < slotEnd) {
           const overlapStart = Math.max(slotStart, info.start);
           const overlapEnd = Math.min(slotEnd, chunkLoadedEnd);
           if (overlapEnd > overlapStart) {
-            const extraPct = Math.round(((overlapEnd - overlapStart) / slotBytes) * 100);
-            pct = Math.min(99, Math.max(pct, extraPct));
+            coveredBytes += overlapEnd - overlapStart;
             workerIndex = info.workerIndex;
           }
         }
       }
+      if (coveredBytes > 0) {
+        pct = Math.min(100, Math.round((coveredBytes / slotBytes) * 100));
+      } else if (rec.downloadedBytes >= slotEnd) {
+        pct = 100;
+      } else if (rec.downloadedBytes > slotStart) {
+        pct = Math.min(100, Math.round(((rec.downloadedBytes - slotStart) / slotBytes) * 100));
+      }
+      return {
+        index: idx,
+        progress: pct,
+        workerIndex,
+      };
+    } else if (rec.downloadedBytes >= slotEnd) {
+      pct = 100;
+    } else if (rec.downloadedBytes > slotStart) {
+      pct = Math.min(100, Math.round(((rec.downloadedBytes - slotStart) / slotBytes) * 100));
     }
 
     return {
       index: idx,
       progress: pct,
-      workerIndex,
+      workerIndex: idx % Math.max(1, rec.parallelStreams),
     };
   });
 }
 
 function updateHlsChunkMap(rec: TransferRecord, completedSegments: number, totalSegments: number) {
-  const SLOTS = 24;
+  const SLOTS = 32;
   if (totalSegments <= 0) return;
   const ratio = Math.min(1, completedSegments / totalSegments);
   const fullSlots = Math.floor(ratio * SLOTS);
@@ -961,10 +974,72 @@ export async function createTransfer(params: {
     throw new Error('Local or private network addresses are blocked.');
   }
 
-  const probe = await probeRemoteUrl(parsedMeta.normalizedUrl);
   const id = `tr-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
-  const chunkSizeMb = Math.min(8, Math.max(2, Math.round(params.chunkSizeMb || 4)));
-  const parallelStreams = Math.min(6, Math.max(1, Math.round(params.parallelStreams || 4)));
+  const chunkSizeMb = Math.min(16, Math.max(1, Math.round(params.chunkSizeMb || 4)));
+  const parallelStreams = Math.min(32, Math.max(1, Math.round(params.parallelStreams || 16)));
+
+  // Route YouTube video URLs directly through the dedicated YouTube + FFmpeg engine
+  if (isYouTubeVideoUrl(parsedMeta.normalizedUrl)) {
+    const isAudioOnly = Boolean(
+      params.requestedQuality && /audio|m4a|mp3/i.test(params.requestedQuality)
+    );
+    const ext = isAudioOnly ? '.m4a' : '.mp4';
+    const rawTitle = sanitizeFilenameForHeader(params.filename || parsedMeta.extractedFilename);
+    const filename = /\.(mp4|m4a|mp3|mkv|webm)$/i.test(rawTitle) ? rawTitle : `${rawTitle}${ext}`;
+    const safeDiskBase = filename.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120) || `youtube${ext}`;
+    const diskFilePath = path.join(DOWNLOADS_DIR, `${id}_${safeDiskBase}`);
+
+    const ytRec: TransferRecord = {
+      id,
+      url: parsedMeta.normalizedUrl,
+      resolvedUrl: parsedMeta.normalizedUrl,
+      filename,
+      contentType: isAudioOnly ? 'audio/mp4' : 'video/mp4',
+      expectedBinary: true,
+      streamType: 'progressive',
+      status: 'connecting',
+      totalBytes: 0,
+      downloadedBytes: 0,
+      speedBytesPerSec: 0,
+      acceptRanges: true,
+      chunkSizeMb,
+      parallelStreams,
+      speedCapMbps:
+        typeof params.speedCapMbps === 'number' && params.speedCapMbps > 0
+          ? params.speedCapMbps
+          : null,
+      retryCount: 0,
+      redirectHops: 0,
+      streamInitialized: false,
+      errorMessage: null,
+      httpStatus: null,
+      quality: params.requestedQuality || '1080p (Full HD)',
+      language: params.requestedLanguage || 'Source Audio',
+      savedOnDisk: false,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      completedAt: null,
+      chunks: Array.from({ length: 32 }, (_, idx) => ({
+        index: idx,
+        progress: 0,
+        workerIndex: idx % parallelStreams,
+      })),
+      paused: false,
+      abortController: null,
+      speedSamples: [],
+      cookies: {},
+      referer: null,
+      filePath: diskFilePath,
+    };
+
+    transfers.set(id, ytRec);
+    if (params.autoStart !== false) {
+      startYouTubeBackgroundTransfer(ytRec);
+    }
+    return ytRec;
+  }
+
+  const probe = await probeRemoteUrl(parsedMeta.normalizedUrl);
 
   let filename = sanitizeFilenameForHeader(
     probe.contentDispositionFilename || params.filename || parsedMeta.extractedFilename
@@ -1088,7 +1163,7 @@ export async function createTransfer(params: {
     createdAt: Date.now(),
     updatedAt: Date.now(),
     completedAt: null,
-    chunks: Array.from({ length: 24 }, (_, idx) => ({
+    chunks: Array.from({ length: 32 }, (_, idx) => ({
       index: idx,
       progress: 0,
       workerIndex: idx % parallelStreams,
@@ -1148,7 +1223,7 @@ export function cancelTransfer(id: string): boolean {
   return true;
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new Error('Transfer aborted'));
@@ -1166,7 +1241,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-async function waitWhilePaused(rec: TransferRecord, signal: AbortSignal): Promise<void> {
+export async function waitWhilePaused(rec: TransferRecord, signal: AbortSignal): Promise<void> {
   while (rec.paused && !signal.aborted) {
     rec.speedBytesPerSec = 0;
     await sleep(200, signal);
@@ -2110,7 +2185,7 @@ export function startBackgroundTransfer(rec: TransferRecord): void {
         allUrls.push(...playlist.segments);
 
         const totalSegments = allUrls.length;
-        const maxAhead = Math.min(2, Math.max(1, rec.parallelStreams));
+        const maxAhead = Math.min(16, Math.max(1, rec.parallelStreams));
         const pending = new Map<number, Promise<Buffer>>();
         const schedule = (idx: number) => {
           if (idx >= totalSegments || pending.has(idx)) return;
@@ -2165,31 +2240,35 @@ export function startBackgroundTransfer(rec: TransferRecord): void {
         return;
       }
 
-      // MODE 1: Parallel Resumable Multi-Chunk HTTP Range Download straight to disk
+      // MODE 1: True Multi-Stream Segmented HTTP Range Download (4, 8, 16, or 32 parallel workers writing directly to offsets on disk)
       if (rec.acceptRanges && rec.totalBytes > 0) {
-        const chunkBytes = Math.min(2, Math.max(1, rec.chunkSizeMb)) * 1024 * 1024;
+        const workerCount = Math.min(32, Math.max(1, rec.parallelStreams));
+        // Slice into at least 32 segments for crisp 32-box tracking while keeping each chunk <= 2 MB in RAM
+        const targetSegmentCount = Math.max(32, workerCount);
+        const rawChunkBytes = Math.ceil(rec.totalBytes / targetSegmentCount);
+        const chunkBytes = Math.min(
+          2 * 1024 * 1024,
+          Math.max(64 * 1024, rawChunkBytes)
+        );
         const totalChunks = Math.ceil(rec.totalBytes / chunkBytes);
-        const maxWindow = Math.min(2, Math.max(1, rec.parallelStreams));
+        const activeWorkers = Math.min(workerCount, totalChunks);
 
         const inFlightMap = new Map<
           number,
           { start: number; end: number; received: number; workerIndex: number }
         >();
-        const chunkPromises = new Map<number, Promise<Buffer>>();
 
-        const scheduleChunk = (idx: number) => {
-          if (idx >= totalChunks || chunkPromises.has(idx)) return;
-          const start = idx * chunkBytes;
-          const end = Math.min(rec.totalBytes - 1, start + chunkBytes - 1);
-          const workerIndex = idx % maxWindow;
-          const p = fetchExactByteRange(rec, start, end, workerIndex, signal, inFlightMap, idx);
-          p.catch(() => {});
-          chunkPromises.set(idx, p);
-        };
-
-        scheduleChunk(0);
-        const firstChunk = await chunkPromises.get(0)!;
-        chunkPromises.delete(0);
+        // Verify chunk 0 first before allocating output file
+        const firstEnd = Math.min(rec.totalBytes - 1, chunkBytes - 1);
+        const firstChunk = await fetchExactByteRange(
+          rec,
+          0,
+          firstEnd,
+          0,
+          signal,
+          inFlightMap,
+          0
+        );
         if (signal.aborted) return;
 
         if (firstChunk.byteLength === 0) {
@@ -2203,23 +2282,76 @@ export function startBackgroundTransfer(rec: TransferRecord): void {
           );
         }
 
-        await openPartFile();
-        for (let w = 1; w <= maxWindow && w < totalChunks; w++) scheduleChunk(w);
+        await fsp.mkdir(DOWNLOADS_DIR, { recursive: true });
+        const fh = await fsp.open(partPath, 'w');
+        try {
+          rec.streamInitialized = true;
+          rec.status = 'downloading';
+          rec.updatedAt = Date.now();
 
-        await writeBufferToDiskRespectingControls(writeStream!, firstChunk, rec, signal);
+          await fh.write(firstChunk, 0, firstChunk.byteLength, 0);
+          inFlightMap.set(0, {
+            start: 0,
+            end: firstEnd,
+            received: firstChunk.byteLength,
+            workerIndex: 0,
+          });
+          recordBytesSent(rec, firstChunk.byteLength);
+          updateChunkMapFromProgress(rec, inFlightMap);
 
-        for (let nextIdx = 1; nextIdx < totalChunks; nextIdx++) {
+          let nextChunkIdx = 1;
+          const runWorker = async (workerIndex: number) => {
+            while (!signal.aborted) {
+              const idx = nextChunkIdx++;
+              if (idx >= totalChunks) break;
+
+              await waitWhilePaused(rec, signal);
+              if (signal.aborted) break;
+
+              const start = idx * chunkBytes;
+              const end = Math.min(rec.totalBytes - 1, start + chunkBytes - 1);
+              const buf = await fetchExactByteRange(
+                rec,
+                start,
+                end,
+                workerIndex,
+                signal,
+                inFlightMap,
+                idx
+              );
+              if (signal.aborted) break;
+
+              await waitWhilePaused(rec, signal);
+              if (signal.aborted) break;
+
+              await fh.write(buf, 0, buf.byteLength, start);
+              inFlightMap.set(idx, {
+                start,
+                end,
+                received: buf.byteLength,
+                workerIndex,
+              });
+              recordBytesSent(rec, buf.byteLength);
+              updateChunkMapFromProgress(rec, inFlightMap);
+
+              // Throttle cleanly if user enabled a global speed cap
+              if (rec.speedCapMbps && rec.speedCapMbps > 0 && rec.speedBytesPerSec > 0) {
+                const capBytes = (rec.speedCapMbps * 1024 * 1024) / 8;
+                if (rec.speedBytesPerSec > capBytes) {
+                  const delayMs = Math.min(250, Math.round(((rec.speedBytesPerSec - capBytes) / capBytes) * 80));
+                  await sleep(delayMs, signal);
+                }
+              }
+            }
+          };
+
+          await Promise.all(
+            Array.from({ length: activeWorkers }, (_, wIdx) => runWorker(wIdx))
+          );
+
           if (signal.aborted) return;
-          for (
-            let lookahead = nextIdx;
-            lookahead < Math.min(totalChunks, nextIdx + maxWindow);
-            lookahead++
-          ) {
-            scheduleChunk(lookahead);
-          }
-          const buf = await chunkPromises.get(nextIdx)!;
-          chunkPromises.delete(nextIdx);
-          await writeBufferToDiskRespectingControls(writeStream!, buf, rec, signal);
+        } finally {
+          await fh.close().catch(() => {});
         }
 
         if (rec.downloadedBytes < rec.totalBytes || rec.downloadedBytes <= 0) {
@@ -2228,8 +2360,6 @@ export function startBackgroundTransfer(rec: TransferRecord): void {
           );
         }
 
-        await finalizeFileStream(writeStream!);
-        writeStream = null;
         await fsp.rename(partPath, finalPath);
         rec.savedOnDisk = true;
         rec.status = 'completed';

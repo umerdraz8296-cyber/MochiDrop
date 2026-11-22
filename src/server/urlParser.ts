@@ -15,7 +15,9 @@ const ALLOWED_PROTOCOLS = new Set(['http:', 'https:', 'ftp:', 'ftps:', 'sftp:'])
 
 // Linear-time anchored regexes (ReDoS-safe)
 const PROTOCOL_RELATIVE_RE = /^\/\/[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?(?:\/.*)?$/i;
-const URL_IN_TEXT_RE = /\bhttps?:\/\/[^\s"'<>`\\]+/i;
+const BARE_DOMAIN_URL_RE = /^(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:\/[^\s"'<>`\\]*)?$/i;
+const TORRENT_INFOHASH_RE = /^[a-f0-9]{40}$/i;
+const URL_IN_TEXT_RE = /\b(?:https?|ftps?|sftp):\/\/[^\s"'<>`\\]+|\bmagnet:\?[^\s"'<>`\\]+/i;
 const EXT_HLS_RE = /\.m3u8(?:$|[?#&/])|(?:^|[?&])(?:format|type|ext)=m3u8(?:$|[&#])|\/hls\/|playlist\.m3u8|master\.m3u8|index(?:-[a-z0-9_]+)?\.m3u8/i;
 const EXT_DASH_RE = /\.mpd(?:$|[?#&/])|(?:^|[?&])(?:format|type|ext)=dash(?:$|[&#])|manifest\.mpd/i;
 const EXT_VIDEO_RE = /\.(?:mp4|mkv|webm|mov|avi|flv|wmv|m4v|ts|m2ts|3gp)(?:$|[?#&])|(?:^|[?&])mime=video(?:%2f|\/)/i;
@@ -112,8 +114,14 @@ export function normalizeRawUrlInput(raw: string): string {
 
   cleaned = unescapeHtmlEntities(cleaned).replace(/\\\//g, '/');
 
+  if (TORRENT_INFOHASH_RE.test(cleaned)) {
+    return `magnet:?xt=urn:btih:${cleaned.toLowerCase()}`;
+  }
+
   if (PROTOCOL_RELATIVE_RE.test(cleaned)) {
     cleaned = `https:${cleaned}`;
+  } else if (BARE_DOMAIN_URL_RE.test(cleaned)) {
+    cleaned = `https://${cleaned}`;
   }
 
   // If user pasted extra text around a link (e.g. "Download link: https://..."), extract the URL cleanly

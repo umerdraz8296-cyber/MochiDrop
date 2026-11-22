@@ -330,7 +330,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.2, ease: EASE_LUXURY }}
-          className="fixed inset-0 z-50 bg-black/88 backdrop-blur-xs flex items-center justify-center p-2 sm:p-5"
+          className="fixed inset-0 z-50 bg-black/82 backdrop-blur-md flex items-center justify-center p-2 sm:p-5"
           onClick={onClose}
         >
           <motion.div
@@ -339,13 +339,13 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.985, y: 8 }}
             transition={{ duration: 0.22, ease: EASE_LUXURY }}
-            className="w-full max-w-5xl border border-neutral-800 bg-[#070707] text-white rounded-md overflow-hidden shadow-2xl flex flex-col max-h-[94vh]"
+            className="w-full max-w-5xl border border-white/[0.1] bg-[#070B09]/92 backdrop-blur-xl text-white rounded-2xl overflow-hidden shadow-2xl flex flex-col max-h-[94vh]"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Top Cinema Header */}
-            <div className="px-4 sm:px-5 py-3.5 border-b border-neutral-800/90 flex flex-wrap items-center justify-between gap-3 bg-[#0B0B0B]">
+            <div className="px-4 sm:px-5 py-3.5 border-b border-white/[0.08] flex flex-wrap items-center justify-between gap-3 bg-white/[0.025]">
               <div className="min-w-0 flex-1 space-y-0.5">
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-mono text-neutral-400 tabular-nums">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-mono text-[#8A9891] tabular-nums">
                   <span>
                     {session.mode === 'online'
                       ? 'Online Stream'
@@ -358,7 +358,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                   {liveTransfer?.status === 'downloading' && liveTransfer.speedBytesPerSec > 0 && (
                     <>
                       <span aria-hidden="true">·</span>
-                      <span className="text-white">{formatSpeedMBps(liveTransfer.speedBytesPerSec)}</span>
+                      <span className="text-[#3BE098]">{formatSpeedMBps(liveTransfer.speedBytesPerSec)}</span>
                     </>
                   )}
                   {probe && probe.height > 0 && (
@@ -398,7 +398,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                   <button
                     type="button"
                     onClick={() => onDownloadOnlineSession(session)}
-                    className="h-8 sm:h-9 px-3 sm:px-3.5 rounded-xs bg-white text-black text-xs font-semibold hover:bg-neutral-200 active:scale-[0.98] transition-all inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                    className="h-8 sm:h-9 px-3 sm:px-3.5 rounded-xl bg-[#1A5E44]/90 hover:bg-[#217455] border border-[#2FD48B]/40 text-white text-xs font-semibold active:scale-[0.98] transition-all inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
                   >
                     <Download className="h-3.5 w-3.5" />
                     Download While Watching
@@ -412,7 +412,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                     <button
                       type="button"
                       onClick={() => onTogglePause(liveTransfer.id)}
-                      className="h-8 sm:h-9 px-3 rounded-xs border border-neutral-700 text-xs font-medium text-neutral-200 hover:bg-neutral-900 active:scale-[0.98] transition-all inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                      className="h-8 sm:h-9 px-3 rounded-xl border border-white/[0.12] bg-white/[0.04] text-xs font-medium text-[#DCE6E1] hover:bg-white/[0.08] active:scale-[0.98] transition-all inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
                     >
                       {liveTransfer.status === 'paused' ? (
                         <>
@@ -432,7 +432,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                   <a
                     href={exportFileHref}
                     download={liveTransfer?.title || session.title}
-                    className="h-8 sm:h-9 px-3 rounded-xs border border-neutral-700 text-xs font-medium text-neutral-200 hover:bg-neutral-900 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
+                    className="h-8 sm:h-9 px-3 rounded-xl border border-white/[0.12] bg-white/[0.04] text-xs font-medium text-[#DCE6E1] hover:bg-white/[0.08] transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
                   >
                     <Download className="h-3.5 w-3.5" />
                     Save File
@@ -443,7 +443,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                   type="button"
                   onClick={onClose}
                   aria-label="Close player"
-                  className="h-8 w-8 sm:h-9 sm:w-9 rounded-xs border border-neutral-800 inline-flex items-center justify-center text-neutral-400 hover:text-white hover:bg-neutral-900 transition-colors cursor-pointer"
+                  className="h-8 w-8 sm:h-9 sm:w-9 rounded-xl border border-white/[0.1] bg-white/[0.03] inline-flex items-center justify-center text-[#8A9891] hover:text-white hover:bg-white/[0.08] transition-colors cursor-pointer"
                 >
                   <X className="h-4 w-4" />
                 </button>
@@ -452,9 +452,9 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
 
             {/* Live Download Buffer Bar inside Player when still downloading */}
             {isTransferMode && liveTransfer && liveTransfer.status !== 'completed' && (
-              <div className="h-1 w-full bg-neutral-900 overflow-hidden">
+              <div className="h-1 w-full bg-white/[0.07] overflow-hidden">
                 <motion.div
-                  className="h-full bg-white"
+                  className="h-full bg-gradient-to-r from-[#1A6B4D] to-[#3BE098]"
                   initial={false}
                   animate={{ width: `${progressPct}%` }}
                   transition={{ duration: 0.35, ease: EASE_LUXURY }}
@@ -573,11 +573,11 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
 
             {/* Universal Engine Timeline & Audio Track Strip (for MKV / Dual Audio / HEVC) */}
             {isMediaKind && (
-              <div className="px-4 sm:px-5 py-2.5 border-t border-neutral-800/80 bg-[#090909] flex flex-wrap items-center justify-between gap-3">
+              <div className="px-4 sm:px-5 py-2.5 border-t border-white/[0.08] bg-white/[0.02] flex flex-wrap items-center justify-between gap-3">
                 <div className="flex-1 min-w-[200px] flex items-center gap-3">
                   {engineMode === 'compat' && totalDurationSec > 0 ? (
                     <>
-                      <span className="font-mono text-[11px] tabular-nums text-neutral-400 shrink-0">
+                      <span className="font-mono text-[11px] tabular-nums text-[#8A9891] shrink-0">
                         {formatClock(effectiveCurrentSec)} / {formatClock(totalDurationSec)}
                       </span>
                       <input
@@ -587,11 +587,11 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                         value={Math.min(Math.floor(totalDurationSec), Math.floor(effectiveCurrentSec))}
                         onChange={(e) => handleCompatSeek(Number(e.target.value))}
                         aria-label="Seek timeline"
-                        className="w-full h-1 accent-white bg-neutral-800 rounded-xs cursor-pointer"
+                        className="w-full h-1 accent-[#2FD48B] bg-white/[0.12] rounded-full cursor-pointer"
                       />
                     </>
                   ) : (
-                    <span className="text-[11px] font-mono text-neutral-500">
+                    <span className="text-[11px] font-mono text-[#76857E]">
                       {engineMode === 'direct'
                         ? 'No sound or black screen? Switch to Universal Engine ->'
                         : 'Universal Engine active (real-time browser-compatible MP4 + stereo AAC audio)'}
@@ -601,13 +601,13 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
 
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
                   {probe && probe.audioTracks.length > 1 && (
-                    <label className="inline-flex items-center gap-1.5 text-xs text-neutral-300">
-                      <AudioLines className="h-3.5 w-3.5 text-neutral-400" />
+                    <label className="inline-flex items-center gap-1.5 text-xs text-[#C5D1CB]">
+                      <AudioLines className="h-3.5 w-3.5 text-[#3BE098]" />
                       <select
                         value={audioTrackIdx}
                         onChange={(e) => handleAudioTrackSwitch(Number(e.target.value))}
                         aria-label="Audio Track"
-                        className="h-7 rounded-xs border border-neutral-700 bg-black px-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-white cursor-pointer"
+                        className="h-7 rounded-lg border border-white/[0.12] bg-[#0B120F] px-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-[#2FD48B] cursor-pointer"
                       >
                         {probe.audioTracks.map((t) => (
                           <option key={t.index} value={t.index}>
@@ -641,7 +641,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                         onNotify('Switched to Direct Proxy Engine');
                       }
                     }}
-                    className="h-7 px-2.5 rounded-xs border border-neutral-700 text-[11px] font-medium text-neutral-200 hover:bg-neutral-900 transition-colors whitespace-nowrap cursor-pointer"
+                    className="h-7 px-2.5 rounded-lg border border-white/[0.12] bg-white/[0.04] text-[11px] font-medium text-[#DCE6E1] hover:bg-white/[0.09] transition-colors whitespace-nowrap cursor-pointer"
                   >
                     {engineMode === 'direct'
                       ? 'Fix Audio / MKV Mode'
@@ -654,13 +654,13 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
             )}
 
             {/* External Desktop Player Bar — VLC (.xspf), Universal (.m3u), Copy Direct Stream URL */}
-            <div className="px-4 sm:px-5 py-3.5 border-t border-neutral-800/90 bg-[#0B0B0B] flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+            <div className="px-4 sm:px-5 py-3.5 border-t border-white/[0.08] bg-white/[0.025] flex flex-col lg:flex-row lg:items-center justify-between gap-3">
               <div className="space-y-0.5 min-w-0">
                 <div className="flex items-center gap-2 text-xs font-medium text-white">
-                  <Tv className="h-3.5 w-3.5 text-neutral-400 shrink-0" />
+                  <Tv className="h-3.5 w-3.5 text-[#3BE098] shrink-0" />
                   <span>Stream in VLC, PotPlayer, IINA, or MPV</span>
                 </div>
-                <p className="text-[11px] text-neutral-500">
+                <p className="text-[11px] text-[#7E8E87]">
                   Double-click the downloaded .xspf / .m3u playlist, or press Ctrl+N in VLC and paste the Direct Stream URL.
                 </p>
               </div>
@@ -672,7 +672,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                   onClick={() =>
                     onNotify('Downloaded VLC Playlist (.xspf) — double-click to stream in VLC')
                   }
-                  className="h-8 px-3 rounded-xs bg-white text-black text-xs font-semibold hover:bg-neutral-200 active:scale-[0.98] transition-all inline-flex items-center gap-1.5 whitespace-nowrap"
+                  className="h-8 px-3 rounded-lg bg-[#1A5E44]/90 hover:bg-[#217455] border border-[#2FD48B]/40 text-white text-xs font-semibold active:scale-[0.98] transition-all inline-flex items-center gap-1.5 whitespace-nowrap"
                 >
                   <MonitorPlay className="h-3.5 w-3.5" />
                   VLC Playlist (.xspf)
@@ -684,7 +684,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                   onClick={() =>
                     onNotify('Downloaded .m3u playlist — open with VLC, IINA, PotPlayer, or MPV')
                   }
-                  className="h-8 px-2.5 rounded-xs border border-neutral-700 text-xs font-medium text-neutral-200 hover:bg-neutral-900 transition-colors inline-flex items-center gap-1 whitespace-nowrap"
+                  className="h-8 px-2.5 rounded-lg border border-white/[0.12] bg-white/[0.04] text-xs font-medium text-[#DCE6E1] hover:bg-white/[0.08] transition-colors inline-flex items-center gap-1 whitespace-nowrap"
                 >
                   Playlist (.m3u)
                 </a>
@@ -698,11 +698,11 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                       'Direct Stream URL copied — in VLC press Ctrl+N, paste & Play'
                     )
                   }
-                  className="h-8 px-2.5 rounded-xs border border-neutral-700 text-xs font-medium text-neutral-200 hover:bg-neutral-900 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                  className="h-8 px-2.5 rounded-lg border border-white/[0.12] bg-white/[0.04] text-xs font-medium text-[#DCE6E1] hover:bg-white/[0.08] transition-colors inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
                 >
                   {copiedKey === 'url' ? (
                     <>
-                      <Check className="h-3 w-3" />
+                      <Check className="h-3 w-3 text-[#3BE098]" />
                       Copied URL
                     </>
                   ) : (
@@ -722,11 +722,11 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                       'VLC command copied — paste into Terminal or Win+R'
                     )
                   }
-                  className="h-8 px-2.5 rounded-xs border border-neutral-800 text-xs font-medium text-neutral-300 hover:bg-neutral-900 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                  className="h-8 px-2.5 rounded-lg border border-white/[0.1] bg-white/[0.03] text-xs font-medium text-[#B8C6BF] hover:bg-white/[0.08] transition-colors inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
                 >
                   {copiedKey === 'cmd' ? (
                     <>
-                      <Check className="h-3 w-3" />
+                      <Check className="h-3 w-3 text-[#3BE098]" />
                       Copied Cmd
                     </>
                   ) : (

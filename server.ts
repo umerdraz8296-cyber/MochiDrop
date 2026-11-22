@@ -36,6 +36,15 @@ import {
   probeMediaStreams,
   streamCompatibleMp4WithFfmpeg,
 } from './src/server/mediaPlayer.ts';
+import {
+  extractYouTubePlaylistId,
+  extractYouTubeVideoId,
+  inspectYouTubePlaylist,
+  isYouTubeVideoUrl,
+  STANDARD_YOUTUBE_RESOLUTIONS,
+  type YouTubePlaylistInspectResult,
+  type YouTubeResolutionOption,
+} from './src/server/youtubeEngine.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -109,7 +118,7 @@ function classifyUrl(
   if (parsed.protocol === 'sftp:') protocol = 'SFTP';
 
   if (
-    /(drive\.google\.com|dropbox\.com|onedrive\.live\.com|1drv\.ms|mega\.nz|mediafire\.com|github\.com\/.+\/releases|huggingface\.co|sourceforge\.net|archive\.org|workers\.dev|pixeldrain\.com|gofile\.io)/i.test(
+    /(drive\.google\.com|dropbox\.com|onedrive\.live\.com|1drv\.ms|mega\.nz|mediafire\.com|github\.com\/.+\/releases|huggingface\.co|sourceforge\.net|archive\.org|workers\.dev|pixeldrain\.com|gofile\.io|terabox|1fichier\.com|krakenfiles\.com|buzzheavier\.com|workupload\.com|catbox\.moe|send\.cm)/i.test(
       lowerHref
     )
   ) {
@@ -139,7 +148,7 @@ function classifyUrl(
     lowerCt.startsWith('video/') ||
     lowerCt === 'application/x-matroska' ||
     hasQualityOrLang ||
-    /(youtube\.com|youtu\.be|vimeo\.com|twitch\.tv|dailymotion\.com|tiktok\.com|instagram\.com\/reel|facebook\.com\/watch|x\.com\/.*\/status|bilibili\.com|rumble\.com)/i.test(
+    /(youtube\.com|youtu\.be|vimeo\.com|twitch\.tv|dailymotion\.com|tiktok\.com|instagram\.com\/(?:reel|p|tv)|facebook\.com\/(?:watch|reel|videos)|fb\.watch|x\.com\/.*\/status|twitter\.com\/.*\/status|bilibili\.com|rumble\.com|streamable\.com|reddit\.com\/r\/.*\/comments|v\.redd\.it|ok\.ru|vk\.com)/i.test(
       lowerHref
     )
   ) {
@@ -153,7 +162,9 @@ function classifyUrl(
   if (
     /\.(mp3|flac|wav|m4a|aac|ogg|opus|wma|aiff)(\?|$)/i.test(lowerName) ||
     lowerCt.startsWith('audio/') ||
-    /(soundcloud\.com|bandcamp\.com|mixcloud\.com|podcasts\.apple\.com)/i.test(host)
+    /(soundcloud\.com|bandcamp\.com|mixcloud\.com|podcasts\.apple\.com|music\.apple\.com|open\.spotify\.com|audiomack\.com|deezer\.com|tidal\.com|music\.youtube\.com)/i.test(
+      host
+    )
   ) {
     return {
       kind: 'audio',
@@ -242,6 +253,52 @@ async function inspectSingleUrl(rawUrl: string) {
 
   if (isBlockedHostname(parsed.hostname)) {
     throw new Error('Local or private network addresses are blocked.');
+  }
+
+  // Dedicated single YouTube video inspection (fast oEmbed metadata + standard resolution choices)
+  if (isYouTubeVideoUrl(parsed.href)) {
+    const videoId = extractYouTubeVideoId(parsed.href);
+    const canonicalWatch = videoId
+      ? `https://www.youtube.com/watch?v=${videoId}`
+      : parsed.href;
+    let ytTitle = videoId ? `YouTube_${videoId}` : 'YouTube_Video';
+    try {
+      const oembedRes = await fetch(
+        `https://www.youtube.com/oembed?url=${encodeURIComponent(canonicalWatch)}&format=json`,
+        { signal: AbortSignal.timeout(4500) }
+      );
+      if (oembedRes.ok) {
+        const meta = (await oembedRes.json()) as { title?: string };
+        if (meta?.title) {
+          ytTitle = sanitizeText(meta.title, 120, ytTitle);
+        }
+      }
+    } catch {
+      // fallback to clean videoId filename
+    }
+    const safeFilename = `${ytTitle.replace(/[\\/:*?"<>|]+/g, '').trim() || 'YouTube_Video'}.mp4`;
+    const isMusicHost = parsed.hostname.toLowerCase().includes('music.youtube');
+    const qualities = STANDARD_YOUTUBE_RESOLUTIONS.map((r) => r.label);
+    return {
+      kind: (isMusicHost ? 'audio' : 'video') as DownloadKind,
+      protocol: 'HTTPS' as TransferProtocol,
+      url: canonicalWatch,
+      resolvedUrl: canonicalWatch,
+      filename: isMusicHost ? safeFilename.replace(/\.mp4$/i, '.m4a') : safeFilename,
+      domain: parsed.hostname,
+      sizeBytes: 0,
+      acceptRanges: true,
+      contentType: isMusicHost ? 'audio/mp4' : 'video/mp4',
+      verifiedLive: true,
+      httpStatus: 200,
+      probeError: null,
+      streamType: 'progressive' as const,
+      redirectHops: 0,
+      quality: isMusicHost ? 'Audio Only (M4A)' : '1080p (Full HD)',
+      language: 'Source Audio',
+      availableLanguages: ['Source Audio'],
+      availableQualities: qualities,
+    };
   }
 
   let cleanName = parsedMeta.extractedFilename;
@@ -444,6 +501,102 @@ async function startServer() {
     res.json({ items, errors });
   });
 
+  // YouTube Playlist Batch Inspector (supports 1 or multiple playlist links at once)
+  app.post('/api/youtube/playlist', async (req, res) => {
+    const rawInputs: string[] = [];
+    if (typeof req.body?.url === 'string' && req.body.url.trim()) {
+      rawInputs.push(
+        ...req.body.url
+          .split(/[\r\n\s,]+/)
+          .map((s: string) => s.trim())
+          .filter(Boolean)
+      );
+    }
+    if (Array.isArray(req.body?.urls)) {
+      for (const entry of req.body.urls) {
+        if (typeof entry === 'string' && entry.trim()) {
+          rawInputs.push(entry.trim());
+        }
+      }
+    }
+
+    // Deduplicate by validated YouTube playlist ID (up to 5 playlists per batch)
+    const uniquePlaylistIds = new Map<string, string>();
+    for (const raw of rawInputs) {
+      if (raw.length > MAX_URL_LENGTH) continue;
+      const pid = extractYouTubePlaylistId(raw);
+      if (pid && !uniquePlaylistIds.has(pid)) {
+        uniquePlaylistIds.set(pid, raw);
+      }
+      if (uniquePlaylistIds.size >= 5) break;
+    }
+
+    if (uniquePlaylistIds.size === 0) {
+      res.status(400).json({
+        error:
+          'Paste a valid YouTube playlist link (e.g. https://www.youtube.com/playlist?list=...) or playlist ID.',
+      });
+      return;
+    }
+
+    const playlists: YouTubePlaylistInspectResult[] = [];
+    const errors: Array<{ playlistId: string; error: string }> = [];
+
+    for (const [pid, raw] of uniquePlaylistIds.entries()) {
+      try {
+        const result = await inspectYouTubePlaylist(raw);
+        playlists.push(result);
+      } catch (err) {
+        errors.push({
+          playlistId: pid,
+          error: err instanceof Error ? err.message : 'Could not load playlist.',
+        });
+      }
+    }
+
+    if (playlists.length === 0) {
+      res.status(400).json({
+        error: errors[0]?.error || 'Could not load the YouTube playlist. Check that it is public or unlisted.',
+      });
+      return;
+    }
+
+    // Merge videos across pasted playlists (deduplicating by videoId) and compute unified session resolutions
+    const seenVideoIds = new Set<string>();
+    const mergedVideos = [];
+    let totalDurationSec = 0;
+    for (const pl of playlists) {
+      for (const v of pl.videos) {
+        if (seenVideoIds.has(v.videoId)) continue;
+        seenVideoIds.add(v.videoId);
+        mergedVideos.push({ ...v, index: mergedVideos.length + 1 });
+        totalDurationSec += v.durationSec;
+      }
+    }
+
+    const probedResolutions = playlists.find((p) => p.resolutionsSource === 'probed')?.availableResolutions;
+    const availableResolutions: YouTubeResolutionOption[] =
+      probedResolutions && probedResolutions.length > 0
+        ? probedResolutions
+        : STANDARD_YOUTUBE_RESOLUTIONS;
+
+    res.json({
+      title:
+        playlists.length === 1
+          ? playlists[0].title
+          : `${playlists.length} YouTube Playlists (${mergedVideos.length} videos)`,
+      author: playlists.length === 1 ? playlists[0].author : 'Multiple Channels',
+      playlistCount: playlists.length,
+      videoCount: mergedVideos.length,
+      totalDurationSec,
+      videos: mergedVideos,
+      availableResolutions,
+      resolutionsSource: probedResolutions ? 'probed' : 'standard',
+      truncated: playlists.some((p) => p.truncated),
+      errors,
+    });
+  });
+
   // Real In-App Download Transfer Engine API (downloads directly into MochiDrop app storage)
   app.post('/api/transfers', async (req, res) => {
     const rawUrl = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
@@ -454,7 +607,7 @@ async function startServer() {
     const requestedLanguage =
       typeof req.body?.language === 'string' ? sanitizeText(req.body.language, 64, '') : undefined;
     const chunkSizeMb = Number(req.body?.chunkSizeMb || 4);
-    const parallelStreams = Number(req.body?.parallelStreams || 4);
+    const parallelStreams = Number(req.body?.parallelStreams || 16);
     const speedCapMbps =
       req.body?.speedCapMbps !== undefined && req.body?.speedCapMbps !== null
         ? Number(req.body.speedCapMbps)

@@ -1,5 +1,19 @@
 export type WorkspaceTab = 'downloads' | 'networks' | 'settings';
 
+export type CategoryFilter =
+  | 'all'
+  | 'compressed'
+  | 'documents'
+  | 'music'
+  | 'video'
+  | 'programs'
+  | 'torrent'
+  | 'completed'
+  | 'incomplete';
+
+export type ConcurrentLimit = 1 | 2 | 3 | 4 | 5;
+export type StreamCountOption = 4 | 8 | 16 | 32;
+
 export type DownloadStatus =
   | 'connecting'
   | 'downloading'
@@ -60,7 +74,7 @@ export interface DownloadItem {
   availableLanguages?: string[];
   availableQualities?: string[];
   variantUrls?: Record<string, string>;
-  source: 'direct' | 'extension' | 'magnet' | 'batch';
+  source: 'direct' | 'extension' | 'magnet' | 'batch' | 'playlist';
   createdAt: number;
   chunkSizeMb: number;
   parallelStreams: number;
@@ -76,6 +90,11 @@ export interface DownloadItem {
   errorMessage?: string | null;
   httpStatus?: number | null;
   directOnly?: boolean;
+  playlistTitle?: string;
+  playlistIndex?: number;
+  durationText?: string;
+  thumbnailUrl?: string;
+  autoQueue?: boolean;
 }
 
 export interface NetworkAdapter {
@@ -107,6 +126,8 @@ export interface PlexoSettings {
   downloadDirectory: string;
   chunkSizeMb: 4 | 8 | 16;
   maxConnectionsPerAdapter: number;
+  preferredStreams: StreamCountOption;
+  maxConcurrentDownloads: ConcurrentLimit;
   globalSpeedCapMbps: number | null;
   backupRacing: boolean;
   diskAwareThrottling: boolean;
@@ -118,6 +139,61 @@ export interface PlexoSettings {
   autoDetectClipboard: boolean;
   skipSmallFilesMb: number;
   siteExclusions: string[];
+}
+
+export interface YouTubeResolutionOption {
+  id: string;
+  label: string;
+  height: number;
+  kind: 'video' | 'audio';
+  badge?: string;
+}
+
+export interface YouTubePlaylistVideo {
+  videoId: string;
+  url: string;
+  title: string;
+  author: string;
+  durationText: string;
+  durationSec: number;
+  thumbnailUrl: string;
+  index: number;
+  playlistTitle: string;
+}
+
+export interface YouTubePlaylistResponse {
+  title: string;
+  author: string;
+  playlistCount: number;
+  videoCount: number;
+  totalDurationSec: number;
+  videos: YouTubePlaylistVideo[];
+  availableResolutions: YouTubeResolutionOption[];
+  resolutionsSource: 'probed' | 'standard';
+  truncated?: boolean;
+  errors?: Array<{ playlistId: string; error: string }>;
+}
+
+export interface AddDownloadPayload {
+  title: string;
+  url: string;
+  domain: string;
+  kind: DownloadKind;
+  protocol?: TransferProtocol;
+  totalBytes: number;
+  quality?: string;
+  language?: string;
+  availableLanguages?: string[];
+  availableQualities?: string[];
+  variantUrls?: Record<string, string>;
+  source: 'direct' | 'extension' | 'magnet' | 'batch' | 'playlist';
+  torrentFiles?: TorrentFileItem[];
+  resumable?: boolean;
+  parallelStreams?: StreamCountOption;
+  playlistTitle?: string;
+  playlistIndex?: number;
+  durationText?: string;
+  thumbnailUrl?: string;
 }
 
 export interface InspectResponse {

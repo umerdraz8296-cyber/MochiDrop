@@ -97,7 +97,9 @@ export function buildDirectVideoLink(
 
 const ALLOWED_PROTOCOLS = new Set(['http:', 'https:', 'ftp:', 'ftps:', 'sftp:']);
 const PROTOCOL_RELATIVE_RE = /^\/\/[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?(?:\/.*)?$/i;
-const EMBEDDED_URL_RE = /\b(?:https?|ftps?|sftp):\/\/[^\s"'<>`\\]+|\bmagnet:\?[^\s"'<>`\\]+/i;
+const BARE_DOMAIN_URL_RE = /^(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:\/[^\s"'<>`\\]*)?$/i;
+const TORRENT_INFOHASH_RE = /^[a-f0-9]{40}$/i;
+const EMBEDDED_URL_RE = /\b(?:https?|ftps?|sftp):\/\/[^\s"'<>`\\]+|\bmagnet:\?[^\s"'<>`\\]+|\bed2k:\/\/[^\s"'<>`\\]+/i;
 
 export function normalizeUrlInput(raw: string): string {
   let cleaned = raw.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
@@ -112,11 +114,17 @@ export function normalizeUrlInput(raw: string): string {
     .replace(/&amp;/gi, '&')
     .replace(/\\\//g, '/');
 
-  if (PROTOCOL_RELATIVE_RE.test(cleaned)) {
-    cleaned = `https:${cleaned}`;
+  if (TORRENT_INFOHASH_RE.test(cleaned)) {
+    return `magnet:?xt=urn:btih:${cleaned.toLowerCase()}`;
   }
 
-  if (!/^(?:https?|ftps?|sftp|magnet):/i.test(cleaned)) {
+  if (PROTOCOL_RELATIVE_RE.test(cleaned)) {
+    cleaned = `https:${cleaned}`;
+  } else if (BARE_DOMAIN_URL_RE.test(cleaned)) {
+    cleaned = `https://${cleaned}`;
+  }
+
+  if (!/^(?:https?|ftps?|sftp|magnet|ed2k):/i.test(cleaned)) {
     const match = cleaned.match(EMBEDDED_URL_RE);
     if (match && match[0]) {
       cleaned = match[0].replace(/[),.;]+$/, '');
@@ -128,7 +136,7 @@ export function normalizeUrlInput(raw: string): string {
 export function isSafeTransferUrl(raw: string): boolean {
   const normalized = normalizeUrlInput(raw);
   if (!normalized) return false;
-  if (normalized.startsWith('magnet:?')) return true;
+  if (normalized.startsWith('magnet:?') || normalized.startsWith('ed2k://')) return true;
   try {
     const u = new URL(normalized);
     return ALLOWED_PROTOCOLS.has(u.protocol);

@@ -1,10 +1,22 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, MotionConfig, motion } from 'motion/react';
 import {
-  ArrowDownToLine,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Clock3,
+  Download,
+  FileArchive,
+  FileText,
+  Film,
+  FolderOpen,
+  HardDrive,
+  Magnet,
   Menu,
   Moon,
+  Music,
   Network,
+  Package,
   Settings,
   Sun,
   X,
@@ -16,14 +28,16 @@ import {
   INITIAL_SETTINGS,
 } from './data/initialState';
 import {
+  AddDownloadPayload,
+  CategoryFilter,
+  ConcurrentLimit,
   DownloadItem,
   DownloadKind,
   DownloadStatus,
   NetworkAdapter,
   PlexoPlugin,
   PlexoSettings,
-  TorrentFileItem,
-  TransferProtocol,
+  StreamCountOption,
   WorkspaceTab,
 } from './types/plexo';
 import { formatSpeedMBps } from './utils/format';
@@ -33,14 +47,18 @@ import { SettingsView } from './components/SettingsView';
 
 const BRAND_NAME = 'MochiDrop';
 
-const NAV_ITEMS: Array<{
-  id: WorkspaceTab;
+const CATEGORY_TREE_CHILDREN: Array<{
+  id: CategoryFilter;
   label: string;
   icon: React.ComponentType<{ className?: string }>;
+  iconColor: string;
 }> = [
-  { id: 'downloads', label: 'Downloads', icon: ArrowDownToLine },
-  { id: 'networks', label: 'Networks', icon: Network },
-  { id: 'settings', label: 'Settings & Plugins', icon: Settings },
+  { id: 'compressed', label: 'Compressed', icon: FileArchive, iconColor: 'text-teal-600 dark:text-teal-400' },
+  { id: 'documents', label: 'Documents', icon: FileText, iconColor: 'text-emerald-600 dark:text-[#3BE098]' },
+  { id: 'music', label: 'Music', icon: Music, iconColor: 'text-lime-600 dark:text-lime-400' },
+  { id: 'video', label: 'Video', icon: Film, iconColor: 'text-[#187A54] dark:text-[#2FD48B]' },
+  { id: 'programs', label: 'Programs', icon: Package, iconColor: 'text-amber-600 dark:text-amber-400' },
+  { id: 'torrent', label: 'Torrents', icon: Magnet, iconColor: 'text-cyan-600 dark:text-cyan-400' },
 ];
 
 interface ServerTransferDto {
@@ -192,6 +210,11 @@ function validateAndMapStreamMetadata(payload: {
     return { ok: true, targetUrl, verifiedQuality, verifiedLanguage };
   }
 
+  // YouTube watch URLs resolve requested resolution server-side from Innertube/yt-dlp formats
+  if (/^https?:\/\/(?:www\.|m\.|music\.)?(?:youtube\.com|youtu\.be)\//i.test(payload.url)) {
+    return { ok: true, targetUrl, verifiedQuality, verifiedLanguage };
+  }
+
   const realQualities = (payload.availableQualities || []).filter(Boolean);
   const realLanguages = (payload.availableLanguages || []).filter(Boolean);
   const urlQualityHint = extractQualityFromUrlMetadata(payload.url, payload.title);
@@ -279,7 +302,7 @@ function validateAndMapStreamMetadata(payload: {
 export default function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     try {
-      const saved = localStorage.getItem('plexo_theme');
+      const saved = localStorage.getItem('mochidrop_theme_v2');
       if (saved === 'light' || saved === 'dark') return saved;
     } catch {
       // ignore storage errors
@@ -288,12 +311,34 @@ export default function App() {
   });
 
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('downloads');
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('all');
+  const [treeExpanded, setTreeExpanded] = useState(true);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const [downloads, setDownloads] = useState<DownloadItem[]>(INITIAL_DOWNLOADS);
   const [adapters, setAdapters] = useState<NetworkAdapter[]>(INITIAL_ADAPTERS);
   const [plugins, setPlugins] = useState<PlexoPlugin[]>(INITIAL_PLUGINS);
-  const [settings, setSettings] = useState<PlexoSettings>(INITIAL_SETTINGS);
+  const [settings, setSettings] = useState<PlexoSettings>(() => {
+    let concurrent = INITIAL_SETTINGS.maxConcurrentDownloads;
+    let preferredStreams = INITIAL_SETTINGS.preferredStreams;
+    try {
+      const savedConc = Number(localStorage.getItem('mochidrop_concurrent'));
+      if (savedConc === 1 || savedConc === 2 || savedConc === 3 || savedConc === 4 || savedConc === 5) {
+        concurrent = savedConc;
+      }
+      const savedStreams = Number(localStorage.getItem('mochidrop_streams'));
+      if (savedStreams === 4 || savedStreams === 8 || savedStreams === 16 || savedStreams === 32) {
+        preferredStreams = savedStreams;
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return {
+      ...INITIAL_SETTINGS,
+      maxConcurrentDownloads: concurrent,
+      preferredStreams,
+    };
+  });
   const [urlInput, setUrlInput] = useState('');
 
   const [toast, setToast] = useState<string | null>(null);
@@ -302,6 +347,7 @@ export default function App() {
   const seenHandoffIdsRef = useRef<Set<string>>(new Set());
   const prevTotalBytesRef = useRef<Record<string, number>>({});
   const prevTransferStatusRef = useRef<Record<string, DownloadStatus>>({});
+  const startingQueueIdsRef = useRef<Set<string>>(new Set());
   const adaptersRef = useRef<NetworkAdapter[]>(INITIAL_ADAPTERS);
   const enabledAdapterIdsRef = useRef<string[]>(
     INITIAL_ADAPTERS.filter((a) => a.enabled).map((a) => a.id)
@@ -325,7 +371,7 @@ export default function App() {
       root.classList.remove('dark');
     }
     try {
-      localStorage.setItem('plexo_theme', theme);
+      localStorage.setItem('mochidrop_theme_v2', theme);
     } catch {
       // ignore
     }
@@ -346,27 +392,17 @@ export default function App() {
   }, [adapters]);
 
   const startRealHttpTransfer = useCallback(
-    async (payload: {
-      existingItemId?: string;
-      title: string;
-      url: string;
-      domain: string;
-      kind: DownloadKind;
-      protocol?: TransferProtocol;
-      totalBytes: number;
-      quality?: string;
-      language?: string;
-      availableLanguages?: string[];
-      availableQualities?: string[];
-      variantUrls?: Record<string, string>;
-      source: 'direct' | 'extension' | 'magnet' | 'batch';
-      torrentFiles?: TorrentFileItem[];
-      resumable?: boolean;
-    }) => {
+    async (
+      payload: AddDownloadPayload & {
+        existingItemId?: string;
+        silentToast?: boolean;
+      }
+    ) => {
       const isHttp = payload.url.startsWith('http://') || payload.url.startsWith('https://');
       const rangeEnabled = plugins.find((p) => p.id === 'plugin-range')?.enabled ?? true;
+      const requestedStreams = payload.parallelStreams ?? settings.preferredStreams;
       const parallelStreams = rangeEnabled
-        ? Math.min(6, Math.max(1, settings.maxConnectionsPerAdapter))
+        ? Math.min(32, Math.max(1, requestedStreams))
         : 1;
       const currentAdapters = adaptersRef.current;
       const enabledIds = enabledAdapterIdsRef.current;
@@ -384,6 +420,16 @@ export default function App() {
       });
 
       if (!validation.ok) {
+        if (payload.existingItemId) {
+          startingQueueIdsRef.current.delete(payload.existingItemId);
+          setDownloads((prev) =>
+            prev.map((d) =>
+              d.id === payload.existingItemId
+                ? { ...d, status: 'error', autoQueue: false, errorMessage: validation.error }
+                : d
+            )
+          );
+        }
         notify(validation.error);
         return;
       }
@@ -414,7 +460,7 @@ export default function App() {
           createdAt: Date.now(),
           chunkSizeMb: settings.chunkSizeMb,
           parallelStreams: 1,
-          chunks: Array.from({ length: 24 }, (_, idx) => ({
+          chunks: Array.from({ length: 32 }, (_, idx) => ({
             index: idx,
             progress: 0,
             adapterId: enabledIds[0],
@@ -424,9 +470,13 @@ export default function App() {
           resumable: false,
           retryCount: 0,
           directOnly: true,
+          autoQueue: false,
           errorMessage: `${payload.protocol || 'This link'} requires a native torrent/FTP client on your device.`,
         };
 
+        if (payload.existingItemId) {
+          startingQueueIdsRef.current.delete(payload.existingItemId);
+        }
         setDownloads((prev) => [externalItem, ...prev]);
         notify(`Queued ${payload.title} (open in native client)`);
         return;
@@ -496,6 +546,11 @@ export default function App() {
           savedOnDisk: serverTr.savedOnDisk ?? false,
           errorMessage: serverTr.errorMessage || null,
           httpStatus: serverTr.httpStatus,
+          playlistTitle: payload.playlistTitle,
+          playlistIndex: payload.playlistIndex,
+          durationText: payload.durationText,
+          thumbnailUrl: payload.thumbnailUrl,
+          autoQueue: false,
         };
 
         prevTotalBytesRef.current[serverTr.id] = serverTr.downloadedBytes || 0;
@@ -503,7 +558,18 @@ export default function App() {
 
         setDownloads((prev) => {
           if (payload.existingItemId) {
-            return prev.map((d) => (d.id === payload.existingItemId ? item : d));
+            return prev.map((d) =>
+              d.id === payload.existingItemId
+                ? {
+                    ...item,
+                    createdAt: d.createdAt,
+                    playlistTitle: d.playlistTitle ?? item.playlistTitle,
+                    playlistIndex: d.playlistIndex ?? item.playlistIndex,
+                    durationText: d.durationText ?? item.durationText,
+                    thumbnailUrl: d.thumbnailUrl ?? item.thumbnailUrl,
+                  }
+                : d
+            );
           }
           return [item, ...prev];
         });
@@ -514,14 +580,207 @@ export default function App() {
         }
 
         // Download runs entirely inside MochiDrop's in-app engine (no Chrome download bar)
-        notify(`Downloading ${item.title} inside MochiDrop`);
+        if (!payload.silentToast) {
+          notify(`Downloading ${item.title} inside MochiDrop`);
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Could not start download.';
+        if (payload.existingItemId) {
+          setDownloads((prev) =>
+            prev.map((d) =>
+              d.id === payload.existingItemId
+                ? { ...d, status: 'error', autoQueue: false, speedBytesPerSec: 0, errorMessage: msg }
+                : d
+            )
+          );
+        }
         notify(msg);
+      } finally {
+        if (payload.existingItemId) {
+          startingQueueIdsRef.current.delete(payload.existingItemId);
+        }
       }
     },
     [notify, plugins, settings]
   );
+
+  const handleChangeConcurrentDownloads = useCallback(
+    (limit: ConcurrentLimit) => {
+      setSettings((prev) => ({ ...prev, maxConcurrentDownloads: limit }));
+      try {
+        localStorage.setItem('mochidrop_concurrent', String(limit));
+      } catch {
+        // ignore
+      }
+      notify(`Simultaneous downloads set to ${limit} at a time`);
+    },
+    [notify]
+  );
+
+  const handleChangePreferredStreams = useCallback(
+    (streams: StreamCountOption) => {
+      setSettings((prev) => ({ ...prev, preferredStreams: streams }));
+      try {
+        localStorage.setItem('mochidrop_streams', String(streams));
+      } catch {
+        // ignore
+      }
+    },
+    []
+  );
+
+  const handleEnqueueBatch = useCallback(
+    (items: AddDownloadPayload[], concurrency?: ConcurrentLimit) => {
+      if (items.length === 0) return;
+      const effectiveLimit = concurrency ?? settings.maxConcurrentDownloads;
+      if (concurrency && concurrency !== settings.maxConcurrentDownloads) {
+        setSettings((prev) => ({ ...prev, maxConcurrentDownloads: concurrency }));
+        try {
+          localStorage.setItem('mochidrop_concurrent', String(concurrency));
+        } catch {
+          // ignore
+        }
+      }
+
+      const now = Date.now();
+      const currentAdapters = adaptersRef.current;
+      const enabledIds = enabledAdapterIdsRef.current;
+      const defaultAdapterId = enabledIds[0] || 'adapter-wifi';
+
+      const queuedItems: DownloadItem[] = items.map((payload, idx) => ({
+        id: `q-${now}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+        title: payload.title,
+        url: payload.url,
+        domain: payload.domain,
+        kind: payload.kind,
+        protocol: payload.protocol || 'HTTPS',
+        status: 'queued',
+        totalBytes: payload.totalBytes || 0,
+        downloadedBytes: 0,
+        speedBytesPerSec: 0,
+        quality: payload.quality,
+        language: payload.language,
+        availableLanguages: payload.availableLanguages,
+        availableQualities: payload.availableQualities,
+        variantUrls: payload.variantUrls,
+        source: payload.source,
+        createdAt: now + idx,
+        chunkSizeMb: settings.chunkSizeMb,
+        parallelStreams: payload.parallelStreams ?? settings.preferredStreams,
+        chunks: Array.from({ length: 32 }, (_, cIdx) => ({
+          index: cIdx,
+          progress: 0,
+          adapterId: defaultAdapterId,
+        })),
+        adapterSplit: Object.fromEntries(currentAdapters.map((a) => [a.id, 0])),
+        torrentFiles: payload.torrentFiles,
+        resumable: payload.resumable ?? true,
+        retryCount: 0,
+        playlistTitle: payload.playlistTitle,
+        playlistIndex: payload.playlistIndex,
+        durationText: payload.durationText,
+        thumbnailUrl: payload.thumbnailUrl,
+        autoQueue: true,
+      }));
+
+      setDownloads((prev) => [...queuedItems, ...prev]);
+      notify(
+        `Queued ${queuedItems.length} ${queuedItems.length === 1 ? 'file' : 'files'} (${effectiveLimit} at a time — next starts automatically)`
+      );
+    },
+    [notify, settings.chunkSizeMb, settings.maxConcurrentDownloads, settings.preferredStreams]
+  );
+
+  const handleStartQueuedNow = useCallback(
+    (id: string) => {
+      const target = downloads.find((d) => d.id === id);
+      if (!target || target.status !== 'queued' || target.directOnly) return;
+      if (startingQueueIdsRef.current.has(id)) return;
+      startingQueueIdsRef.current.add(id);
+
+      setDownloads((prev) =>
+        prev.map((d) => (d.id === id ? { ...d, status: 'connecting', autoQueue: false } : d))
+      );
+
+      void startRealHttpTransfer({
+        existingItemId: target.id,
+        title: target.title,
+        url: target.url,
+        domain: target.domain,
+        kind: target.kind,
+        protocol: target.protocol,
+        totalBytes: target.totalBytes,
+        quality: target.quality,
+        language: target.language,
+        availableLanguages: target.availableLanguages,
+        availableQualities: target.availableQualities,
+        variantUrls: target.variantUrls,
+        source: target.source,
+        torrentFiles: target.torrentFiles,
+        resumable: target.resumable,
+        playlistTitle: target.playlistTitle,
+        playlistIndex: target.playlistIndex,
+        durationText: target.durationText,
+        thumbnailUrl: target.thumbnailUrl,
+      });
+    },
+    [downloads, startRealHttpTransfer]
+  );
+
+  // Auto-advancing Concurrency Queue Scheduler (runs 1..5 simultaneously, auto-starts next when one finishes)
+  useEffect(() => {
+    const activeCount = downloads.filter(
+      (d) => d.status === 'downloading' || d.status === 'connecting'
+    ).length;
+    const freeSlots = settings.maxConcurrentDownloads - activeCount;
+    if (freeSlots <= 0) return;
+
+    const candidates = downloads.filter(
+      (d) =>
+        d.status === 'queued' &&
+        d.autoQueue &&
+        !d.directOnly &&
+        !startingQueueIdsRef.current.has(d.id)
+    );
+    if (candidates.length === 0) return;
+
+    const toLaunch = candidates.slice(0, freeSlots);
+    const launchIds = new Set(toLaunch.map((c) => c.id));
+    for (const item of toLaunch) {
+      startingQueueIdsRef.current.add(item.id);
+    }
+
+    setDownloads((prev) =>
+      prev.map((d) =>
+        launchIds.has(d.id) ? { ...d, status: 'connecting', autoQueue: false } : d
+      )
+    );
+
+    for (const item of toLaunch) {
+      void startRealHttpTransfer({
+        existingItemId: item.id,
+        title: item.title,
+        url: item.url,
+        domain: item.domain,
+        kind: item.kind,
+        protocol: item.protocol,
+        totalBytes: item.totalBytes,
+        quality: item.quality,
+        language: item.language,
+        availableLanguages: item.availableLanguages,
+        availableQualities: item.availableQualities,
+        variantUrls: item.variantUrls,
+        source: item.source,
+        torrentFiles: item.torrentFiles,
+        resumable: item.resumable,
+        playlistTitle: item.playlistTitle,
+        playlistIndex: item.playlistIndex,
+        durationText: item.durationText,
+        thumbnailUrl: item.thumbnailUrl,
+        silentToast: toLaunch.length > 1,
+      });
+    }
+  }, [downloads, settings.maxConcurrentDownloads, startRealHttpTransfer]);
 
   // Restore any active or completed in-app transfers already stored on the server
   useEffect(() => {
@@ -893,6 +1152,10 @@ export default function App() {
         source: item.source,
         torrentFiles: item.torrentFiles,
         resumable: item.resumable,
+        playlistTitle: item.playlistTitle,
+        playlistIndex: item.playlistIndex,
+        durationText: item.durationText,
+        thumbnailUrl: item.thumbnailUrl,
       });
     },
     [startRealHttpTransfer]
@@ -900,6 +1163,7 @@ export default function App() {
 
   const handleRemove = useCallback(
     async (id: string) => {
+      startingQueueIdsRef.current.delete(id);
       const target = downloads.find((d) => d.id === id);
       if (target?.serverTransferId) {
         try {
@@ -954,6 +1218,25 @@ export default function App() {
     notify('Resumed paused downloads');
   }, [downloads, notify]);
 
+  const handleClearCompleted = useCallback(async () => {
+    const completed = downloads.filter((d) => d.status === 'completed');
+    if (completed.length === 0) {
+      notify('No completed transfers to clear');
+      return;
+    }
+    await Promise.all(
+      completed
+        .filter((d) => Boolean(d.serverTransferId))
+        .map((d) =>
+          fetch(`/api/transfers/${encodeURIComponent(d.serverTransferId!)}`, {
+            method: 'DELETE',
+          }).catch(() => {})
+        )
+    );
+    setDownloads((prev) => prev.filter((d) => d.status !== 'completed'));
+    notify(`Cleared ${completed.length} completed ${completed.length === 1 ? 'file' : 'files'}`);
+  }, [downloads, notify]);
+
   const liveAggregateBytesPerSec = useMemo(
     () =>
       downloads.reduce(
@@ -969,275 +1252,506 @@ export default function App() {
     [downloads]
   );
 
-  const activeNavTitle =
-    NAV_ITEMS.find((item) => item.id === activeTab)?.label || 'Downloads';
+  const queuedCount = useMemo(
+    () => downloads.filter((d) => d.status === 'queued' && !d.directOnly).length,
+    [downloads]
+  );
+
+  const completedCount = useMemo(
+    () => downloads.filter((d) => d.status === 'completed').length,
+    [downloads]
+  );
+
+  const incompleteCount = useMemo(
+    () => downloads.filter((d) => d.status !== 'completed').length,
+    [downloads]
+  );
+
+  const categoryCounts = useMemo(() => {
+    const counts: Record<CategoryFilter, number> = {
+      all: downloads.length,
+      compressed: 0,
+      documents: 0,
+      music: 0,
+      video: 0,
+      programs: 0,
+      torrent: 0,
+      completed: 0,
+      incomplete: 0,
+    };
+    for (const d of downloads) {
+      if (d.kind === 'archive') counts.compressed += 1;
+      else if (d.kind === 'document' || d.kind === 'image' || d.kind === 'file') counts.documents += 1;
+      else if (d.kind === 'audio') counts.music += 1;
+      else if (d.kind === 'video') counts.video += 1;
+      else if (d.kind === 'software') counts.programs += 1;
+      else if (d.kind === 'torrent') counts.torrent += 1;
+
+      if (d.status === 'completed') counts.completed += 1;
+      else counts.incomplete += 1;
+    }
+    return counts;
+  }, [downloads]);
+
+  const selectCategory = useCallback((cat: CategoryFilter) => {
+    setActiveTab('downloads');
+    setCategoryFilter(cat);
+    setMobileNavOpen(false);
+  }, []);
 
   return (
     <MotionConfig reducedMotion="user">
-      <div className="min-h-screen flex bg-[#F8F8F8] text-[#0A0A0A] dark:bg-[#050505] dark:text-[#F5F5F5] transition-colors duration-200">
-        <AnimatePresence>
-          {mobileNavOpen && (
-            <motion.div
-              key="mobile-nav-backdrop"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.18 }}
-              onClick={() => setMobileNavOpen(false)}
-              className="fixed inset-0 z-40 bg-black/75 backdrop-blur-xs lg:hidden"
-            />
-          )}
-        </AnimatePresence>
+      <div className="mochi-canvas min-h-screen flex flex-col text-[#111B16] dark:text-[#F4F8F6] transition-colors duration-200">
+        {/* Minimalist Top Bar: Brand + Single Light/Dark Toggle (No Duplicate Nav Tabs) */}
+        <header className="sticky top-0 z-30 h-14 px-4 sm:px-6 border-b border-[#0F241B]/10 dark:border-white/[0.08] bg-white/60 dark:bg-[#070B09]/70 backdrop-blur-xl flex items-center justify-between gap-4">
+          {/* Left: Mobile Sidebar Trigger + Brand Wordmark */}
+          <div className="flex items-center gap-2.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => setMobileNavOpen(true)}
+              aria-label="Open navigation sidebar"
+              className="lg:hidden h-8 w-8 rounded-lg border border-[#0F241B]/12 dark:border-white/[0.1] bg-white/50 dark:bg-white/[0.04] inline-flex items-center justify-center text-[#4D6157] dark:text-[#96A39D] cursor-pointer"
+            >
+              <Menu className="h-4 w-4" />
+            </button>
 
-        {/* Left Sidebar Navigation */}
-        <aside
-          className={`fixed lg:sticky top-0 left-0 z-50 h-screen w-64 shrink-0 border-r border-neutral-200/90 dark:border-neutral-800/85 bg-white dark:bg-[#090909] flex flex-col justify-between transition-transform duration-200 ease-out lg:translate-x-0 ${
-            mobileNavOpen ? 'translate-x-0' : '-translate-x-full'
-          }`}
-        >
-          <div className="flex flex-col">
-            <div className="h-16 px-5 border-b border-neutral-200/80 dark:border-neutral-800/80 flex items-center justify-between">
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab('downloads');
-                  setMobileNavOpen(false);
-                }}
-                className="flex items-center gap-3 text-left cursor-pointer whitespace-nowrap shrink-0 group"
-              >
-                <span className="h-7 w-7 rounded-xs bg-black text-white dark:bg-white dark:text-black font-display font-bold text-sm flex items-center justify-center transition-transform duration-150 group-hover:scale-105">
-                  M
-                </span>
-                <span className="font-display text-lg font-bold tracking-tight text-black dark:text-white">
-                  {BRAND_NAME}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setMobileNavOpen(false)}
-                aria-label="Close menu"
-                className="lg:hidden p-1.5 text-neutral-500 hover:text-black dark:hover:text-white transition-colors"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            <nav className="p-3 space-y-1">
-              {NAV_ITEMS.map((item) => {
-                const Icon = item.icon;
-                const isActive = activeTab === item.id;
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => {
-                      setActiveTab(item.id);
-                      setMobileNavOpen(false);
-                    }}
-                    className={`relative w-full flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-xs text-sm font-medium transition-colors duration-150 whitespace-nowrap cursor-pointer ${
-                      isActive
-                        ? 'text-white dark:text-black'
-                        : 'text-neutral-600 dark:text-neutral-400 hover:text-black dark:hover:text-white hover:bg-neutral-100/80 dark:hover:bg-neutral-900/70'
-                    }`}
-                  >
-                    {isActive && (
-                      <motion.span
-                        layoutId="mochidrop-nav-indicator"
-                        transition={{ type: 'spring', stiffness: 440, damping: 36 }}
-                        className="absolute inset-0 rounded-xs bg-black dark:bg-white"
-                      />
-                    )}
-                    <span className="relative z-10 inline-flex items-center gap-2.5">
-                      <Icon className="h-4 w-4 shrink-0" />
-                      <span>{item.label}</span>
-                    </span>
-
-                    {item.id === 'downloads' && activeDownloadCount > 0 && (
-                      <span
-                        className={`relative z-10 font-mono text-xs tabular-nums ${
-                          isActive ? 'text-white/80 dark:text-black/75' : 'text-neutral-400'
-                        }`}
-                      >
-                        {activeDownloadCount}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </nav>
+            <button
+              type="button"
+              onClick={() => selectCategory('all')}
+              className="flex items-center gap-2.5 text-left whitespace-nowrap shrink-0 cursor-pointer group"
+            >
+              <span className="h-7 w-7 rounded-lg bg-[#0D231A] border border-[#2FD48B]/40 text-[#2FD48B] flex items-center justify-center shadow-[0_0_16px_rgba(47,212,139,0.22)] transition-transform duration-150 group-hover:scale-105">
+                <Download className="h-3.5 w-3.5 stroke-[2.5]" />
+              </span>
+              <span className="font-display text-base font-bold tracking-tight text-[#111B16] dark:text-white">
+                {BRAND_NAME}
+              </span>
+            </button>
           </div>
 
-          <div className="p-5 border-t border-neutral-200/80 dark:border-neutral-800/80">
-            <div className="space-y-1">
-              <div className="flex items-center justify-between text-[11px] text-neutral-500 dark:text-neutral-400">
-                <span>Live throughput</span>
-                <span className="font-mono tabular-nums">
-                  {activeDownloadCount} active
-                </span>
-              </div>
-              <div className="font-mono text-lg font-semibold tracking-tight tabular-nums text-black dark:text-white">
-                {formatSpeedMBps(liveAggregateBytesPerSec)}
-              </div>
-            </div>
-          </div>
-        </aside>
-
-        {/* Main Content Area */}
-        <div className="flex-1 min-w-0 flex flex-col">
-          {/* Solid Opaque Top Bar (Single Theme Toggle Only) */}
-          <header className="sticky top-0 z-30 h-16 px-4 sm:px-8 border-b border-neutral-200/85 dark:border-neutral-800/85 bg-white/95 dark:bg-[#050505]/95 backdrop-blur-xs flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3 min-w-0">
-              <button
-                type="button"
-                onClick={() => setMobileNavOpen(true)}
-                aria-label="Open menu"
-                className="lg:hidden h-9 w-9 rounded-xs border border-neutral-200 dark:border-neutral-800 inline-flex items-center justify-center text-neutral-700 dark:text-neutral-200"
-              >
-                <Menu className="h-4 w-4" />
-              </button>
-
-              <div className="flex items-center gap-2 text-sm truncate">
-                <span className="text-neutral-400 dark:text-neutral-500 whitespace-nowrap">
-                  {BRAND_NAME}
-                </span>
-                <span className="text-neutral-300 dark:text-neutral-700" aria-hidden="true">
-                  /
-                </span>
-                <h1 className="font-display font-semibold tracking-tight text-black dark:text-white truncate">
-                  {activeNavTitle}
-                </h1>
-              </div>
-            </div>
-
+          {/* Right: Single Light / Dark Toggle */}
+          <div className="flex items-center shrink-0">
             <motion.button
               whileTap={{ scale: 0.96 }}
               type="button"
               onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
               aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-              className="h-9 px-3 rounded-xs border border-neutral-200 dark:border-neutral-800 text-xs font-medium text-neutral-800 dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-900 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+              className="h-8 px-3 rounded-lg border border-[#0F241B]/12 dark:border-white/[0.1] bg-white/65 dark:bg-white/[0.04] text-xs font-medium text-[#203329] dark:text-[#D5DFDA] hover:border-[#1B6B4D]/40 dark:hover:border-[#2FD48B]/35 hover:bg-white/90 dark:hover:bg-white/[0.08] transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
             >
               {theme === 'dark' ? (
                 <>
-                  <Sun className="h-3.5 w-3.5" />
+                  <Sun className="h-3.5 w-3.5 text-[#3BE098]" />
                   <span>Light</span>
                 </>
               ) : (
                 <>
-                  <Moon className="h-3.5 w-3.5" />
+                  <Moon className="h-3.5 w-3.5 text-[#1A6B4D]" />
                   <span>Dark</span>
                 </>
               )}
             </motion.button>
-          </header>
+          </div>
+        </header>
 
-          <main className="flex-1 p-4 sm:p-8 max-w-[1440px] w-full mx-auto">
-            <AnimatePresence mode="wait">
+        {/* Workspace Body: Left Single-Side Sidebar + Main Canvas */}
+        <div className="flex-1 flex min-h-0 relative">
+          <AnimatePresence>
+            {mobileNavOpen && (
               <motion.div
-                key={activeTab}
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
-                transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-              >
-                {activeTab === 'downloads' && (
-                  <DownloadsView
-                    downloads={downloads}
-                    adapters={adapters}
-                    settings={settings}
-                    urlInput={urlInput}
-                    onUrlInputChange={setUrlInput}
-                    onAddDownload={(payload) => void startRealHttpTransfer(payload)}
-                    onTogglePause={(id) => void handleTogglePause(id)}
-                    onRetryTransfer={handleRetryOrRedownload}
-                    onRemove={(id) => void handleRemove(id)}
-                    onMoveItem={(id, dir) => {
-                      setDownloads((prev) => {
-                        const idx = prev.findIndex((d) => d.id === id);
-                        if (idx === -1) return prev;
-                        const target = dir === 'up' ? idx - 1 : idx + 1;
-                        if (target < 0 || target >= prev.length) return prev;
-                        const copy = [...prev];
-                        const [moved] = copy.splice(idx, 1);
-                        copy.splice(target, 0, moved);
-                        return copy;
-                      });
-                    }}
-                    onPauseAll={() => void handlePauseAll()}
-                    onResumeAll={() => void handleResumeAll()}
-                    onUpdateTrack={(id, quality, language) => {
-                      setDownloads((prev) =>
-                        prev.map((d) =>
-                          d.id === id
-                            ? {
-                                ...d,
-                                url: d.variantUrls?.[quality] || d.url,
-                                quality,
-                                language,
-                              }
-                            : d
-                        )
-                      );
-                      notify(`Selected track: ${quality} · ${language}`);
-                    }}
-                    onToggleAdapter={handleToggleAdapter}
-                    onNotify={notify}
-                    onOpenNetworksView={() => setActiveTab('networks')}
-                  />
-                )}
+                key="mobile-nav-backdrop"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.18 }}
+                onClick={() => setMobileNavOpen(false)}
+                className="fixed inset-0 z-40 bg-black/65 backdrop-blur-xs lg:hidden"
+              />
+            )}
+          </AnimatePresence>
 
-                {activeTab === 'networks' && (
-                  <NetworksView
-                    adapters={adapters}
-                    settings={settings}
-                    onToggleAdapter={handleToggleAdapter}
-                    onUpdateAdapter={(id, patch) => {
-                      setAdapters((prev) =>
-                        prev.map((a) => (a.id === id ? { ...a, ...patch } : a))
-                      );
-                    }}
-                    onAddAdapter={(name, interfaceType, maxCapacityMbps) => {
-                      const idx = adapters.length;
-                      const newAdapter: NetworkAdapter = {
-                        id: `adapter-${Date.now()}`,
-                        deviceCode: interfaceType === 'Cellular USB' ? `usb${idx}` : `en${idx}`,
-                        name,
-                        interfaceType,
-                        enabled: true,
-                        maxCapacityMbps,
-                        currentSpeedMbps: 0,
-                        speedCapMbps: null,
-                        dataBudgetGb: null,
-                        budgetPeriod: 'monthly',
-                        usedDataGb: 0,
-                        metered: interfaceType === 'Cellular USB',
-                        shade: 'stripe',
-                        historyMbps: Array(16).fill(0),
-                      };
-                      setAdapters((prev) => [...prev, newAdapter]);
-                      notify(`Added ${name}`);
-                    }}
-                    onUpdateSettings={(patch) => setSettings((prev) => ({ ...prev, ...patch }))}
-                  />
-                )}
+          {/* Single-Side Left Navigation Sidebar */}
+          <aside
+            className={`fixed lg:sticky top-14 left-0 z-40 h-[calc(100vh-3.5rem)] ${
+              downloads.length > 0 ? 'lg:h-[calc(100vh-5.75rem)]' : 'lg:h-[calc(100vh-3.5rem)]'
+            } w-56 shrink-0 border-r border-[#0F241B]/10 dark:border-white/[0.08] bg-white/55 dark:bg-[#080D0B]/65 backdrop-blur-xl flex flex-col justify-between overflow-y-auto transition-transform duration-200 ease-out lg:translate-x-0 ${
+              mobileNavOpen ? 'translate-x-0' : '-translate-x-full'
+            }`}
+          >
+            <div className="p-3.5 space-y-3">
+              <div className="flex items-center justify-between lg:hidden pb-2 border-b border-[#0F241B]/10 dark:border-white/[0.08]">
+                <span className="font-display text-sm font-semibold text-[#111B16] dark:text-white">
+                  Navigation
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setMobileNavOpen(false)}
+                  aria-label="Close sidebar"
+                  className="p-1 text-[#5E7067] hover:text-[#111B16] dark:hover:text-white cursor-pointer"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
 
-                {activeTab === 'settings' && (
-                  <SettingsView
-                    plugins={plugins}
-                    settings={settings}
-                    onTogglePlugin={(id) => {
-                      setPlugins((prev) =>
-                        prev.map((p) => (p.id === id ? { ...p, enabled: !p.enabled } : p))
+              {/* Primary Single-Side Navigation: Downloads (with progressive category tree once downloads exist) */}
+              <div className="space-y-1">
+                <div className="flex items-center gap-0.5">
+                  {downloads.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setTreeExpanded((v) => !v)}
+                      aria-label={treeExpanded ? 'Collapse categories' : 'Expand categories'}
+                      className="h-8 w-6 shrink-0 rounded-md inline-flex items-center justify-center text-[#687B72] hover:text-[#111B16] dark:hover:text-white cursor-pointer"
+                    >
+                      {treeExpanded ? (
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => selectCategory('all')}
+                    className={`relative flex-1 flex items-center justify-between gap-2 px-3 py-2 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                      activeTab === 'downloads' && categoryFilter === 'all'
+                        ? 'text-[#126646] dark:text-[#3BE098]'
+                        : 'text-[#283B32] dark:text-[#C5D1CB] hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'
+                    }`}
+                  >
+                    {activeTab === 'downloads' && categoryFilter === 'all' && (
+                      <motion.span
+                        layoutId="mochidrop-tree-active"
+                        transition={{ type: 'spring', stiffness: 460, damping: 36 }}
+                        className="absolute inset-0 rounded-xl bg-[#E2F5EC]/85 dark:bg-[#0F2B20]/85 border border-[#1C6B4D]/20 dark:border-[#2FD48B]/35"
+                      />
+                    )}
+                    <span className="relative z-10 inline-flex items-center gap-2">
+                      <FolderOpen className="h-3.5 w-3.5 text-[#1A7A54] dark:text-[#2FD48B]" />
+                      <span>Downloads</span>
+                    </span>
+                    {categoryCounts.all > 0 && (
+                      <span className="relative z-10 font-mono text-[11px] tabular-nums text-[#64786E] dark:text-[#7E8E87]">
+                        {categoryCounts.all}
+                      </span>
+                    )}
+                  </button>
+                </div>
+
+                {/* Show Category Sub-tree & Status filters ONLY once downloads exist */}
+                {downloads.length > 0 && treeExpanded && (
+                  <div className="ml-3 pl-3 border-l border-[#0F241B]/12 dark:border-white/[0.08] space-y-0.5">
+                    {CATEGORY_TREE_CHILDREN.map((node) => {
+                      const Icon = node.icon;
+                      const isActive = activeTab === 'downloads' && categoryFilter === node.id;
+                      const count = categoryCounts[node.id];
+                      return (
+                        <button
+                          key={node.id}
+                          type="button"
+                          onClick={() => selectCategory(node.id)}
+                          className={`relative w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                            isActive
+                              ? 'text-[#126646] dark:text-[#3BE098]'
+                              : 'text-[#4D6157] dark:text-[#8E9B95] hover:text-[#111B16] dark:hover:text-white hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'
+                          }`}
+                        >
+                          {isActive && (
+                            <motion.span
+                              layoutId="mochidrop-tree-active"
+                              transition={{ type: 'spring', stiffness: 460, damping: 36 }}
+                              className="absolute inset-0 rounded-lg bg-[#E2F5EC]/85 dark:bg-[#0F2B20]/85 border border-[#1C6B4D]/20 dark:border-[#2FD48B]/35"
+                            />
+                          )}
+                          <span className="relative z-10 inline-flex items-center gap-2">
+                            <Icon className={`h-3.5 w-3.5 shrink-0 ${node.iconColor}`} />
+                            <span>{node.label}</span>
+                          </span>
+                          {count > 0 && (
+                            <span className="relative z-10 font-mono text-[11px] tabular-nums text-[#64786E] dark:text-[#7E8E87]">
+                              {count}
+                            </span>
+                          )}
+                        </button>
                       );
-                    }}
-                    onUpdateSettings={(patch) => setSettings((prev) => ({ ...prev, ...patch }))}
-                    onNotify={notify}
-                  />
+                    })}
+                  </div>
                 )}
-              </motion.div>
-            </AnimatePresence>
+              </div>
+
+              {downloads.length > 0 && (
+                <div className="pt-2 border-t border-[#0F241B]/10 dark:border-white/[0.08] space-y-0.5">
+                  <button
+                    type="button"
+                    onClick={() => selectCategory('completed')}
+                    className={`relative w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                      activeTab === 'downloads' && categoryFilter === 'completed'
+                        ? 'text-[#126646] dark:text-[#3BE098]'
+                        : 'text-[#4D6157] dark:text-[#8E9B95] hover:text-[#111B16] dark:hover:text-white hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'
+                    }`}
+                  >
+                    {activeTab === 'downloads' && categoryFilter === 'completed' && (
+                      <motion.span
+                        layoutId="mochidrop-tree-active"
+                        transition={{ type: 'spring', stiffness: 460, damping: 36 }}
+                        className="absolute inset-0 rounded-xl bg-[#E2F5EC]/85 dark:bg-[#0F2B20]/85 border border-[#1C6B4D]/20 dark:border-[#2FD48B]/35"
+                      />
+                    )}
+                    <span className="relative z-10 inline-flex items-center gap-2">
+                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-[#3BE098]" />
+                      <span>Completed</span>
+                    </span>
+                    {completedCount > 0 && (
+                      <span className="relative z-10 font-mono text-[11px] tabular-nums text-[#64786E] dark:text-[#7E8E87]">
+                        {completedCount}
+                      </span>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => selectCategory('incomplete')}
+                    className={`relative w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                      activeTab === 'downloads' && categoryFilter === 'incomplete'
+                        ? 'text-[#126646] dark:text-[#3BE098]'
+                        : 'text-[#4D6157] dark:text-[#8E9B95] hover:text-[#111B16] dark:hover:text-white hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'
+                    }`}
+                  >
+                    {activeTab === 'downloads' && categoryFilter === 'incomplete' && (
+                      <motion.span
+                        layoutId="mochidrop-tree-active"
+                        transition={{ type: 'spring', stiffness: 460, damping: 36 }}
+                        className="absolute inset-0 rounded-xl bg-[#E2F5EC]/85 dark:bg-[#0F2B20]/85 border border-[#1C6B4D]/20 dark:border-[#2FD48B]/35"
+                      />
+                    )}
+                    <span className="relative z-10 inline-flex items-center gap-2">
+                      <Clock3 className="h-3.5 w-3.5 text-[#1A7A54] dark:text-[#2FD48B]" />
+                      <span>In Progress</span>
+                    </span>
+                    {incompleteCount > 0 && (
+                      <span className="relative z-10 font-mono text-[11px] tabular-nums text-[#64786E] dark:text-[#7E8E87]">
+                        {incompleteCount}
+                      </span>
+                    )}
+                  </button>
+                </div>
+              )}
+
+              {/* Networks & Settings (Single-Side Only — Zero Duplication) */}
+              <div className="pt-2 border-t border-[#0F241B]/10 dark:border-white/[0.08] space-y-0.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('networks');
+                    setMobileNavOpen(false);
+                  }}
+                  className={`relative w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                    activeTab === 'networks'
+                      ? 'text-[#126646] dark:text-[#3BE098]'
+                      : 'text-[#4D6157] dark:text-[#8E9B95] hover:text-[#111B16] dark:hover:text-white hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'
+                  }`}
+                >
+                  {activeTab === 'networks' && (
+                    <motion.span
+                      layoutId="mochidrop-tree-active"
+                      transition={{ type: 'spring', stiffness: 460, damping: 36 }}
+                      className="absolute inset-0 rounded-xl bg-[#E2F5EC]/85 dark:bg-[#0F2B20]/85 border border-[#1C6B4D]/20 dark:border-[#2FD48B]/35"
+                    />
+                  )}
+                  <span className="relative z-10 inline-flex items-center gap-2">
+                    <Network className="h-3.5 w-3.5 text-teal-600 dark:text-[#2FD48B]" />
+                    <span>Networks</span>
+                  </span>
+                  <span className="relative z-10 font-mono text-[11px] tabular-nums text-[#64786E] dark:text-[#7E8E87]">
+                    {enabledAdapters.length}/{adapters.length}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('settings');
+                    setMobileNavOpen(false);
+                  }}
+                  className={`relative w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                    activeTab === 'settings'
+                      ? 'text-[#126646] dark:text-[#3BE098]'
+                      : 'text-[#4D6157] dark:text-[#8E9B95] hover:text-[#111B16] dark:hover:text-white hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'
+                  }`}
+                >
+                  {activeTab === 'settings' && (
+                    <motion.span
+                      layoutId="mochidrop-tree-active"
+                      transition={{ type: 'spring', stiffness: 460, damping: 36 }}
+                      className="absolute inset-0 rounded-xl bg-[#E2F5EC]/85 dark:bg-[#0F2B20]/85 border border-[#1C6B4D]/20 dark:border-[#2FD48B]/35"
+                    />
+                  )}
+                  <span className="relative z-10 inline-flex items-center gap-2">
+                    <Settings className="h-3.5 w-3.5 text-[#64786E] dark:text-[#8E9B95]" />
+                    <span>Settings</span>
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {/* Subtle Footer Storage Indicator */}
+            <div className="p-3.5 border-t border-[#0F241B]/10 dark:border-white/[0.08] text-[11px] text-[#5B6E64] dark:text-[#7E8E87]">
+              <div className="flex items-center gap-1.5 font-medium text-[#22352C] dark:text-[#D1DCD6]">
+                <HardDrive className="h-3.5 w-3.5 text-[#1A7A54] dark:text-[#2FD48B]" />
+                <span>In-App Storage</span>
+              </div>
+            </div>
+          </aside>
+
+          {/* Main Workspace Canvas (Transparent so dot-matrix + emerald glow shines through) */}
+          <main className="flex-1 min-w-0 bg-transparent p-4 sm:p-6 pb-16">
+            <div className="max-w-[1280px] mx-auto w-full">
+              <AnimatePresence mode="wait">
+                <motion.div
+                  key={activeTab}
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+                >
+                  {activeTab === 'downloads' && (
+                    <DownloadsView
+                      downloads={downloads}
+                      adapters={adapters}
+                      settings={settings}
+                      liveAggregateBytesPerSec={liveAggregateBytesPerSec}
+                      categoryFilter={categoryFilter}
+                      onCategoryChange={setCategoryFilter}
+                      urlInput={urlInput}
+                      onUrlInputChange={setUrlInput}
+                      onAddDownload={(payload) => void startRealHttpTransfer(payload)}
+                      onEnqueueBatch={handleEnqueueBatch}
+                      onStartQueuedNow={handleStartQueuedNow}
+                      onChangeConcurrent={handleChangeConcurrentDownloads}
+                      onChangePreferredStreams={handleChangePreferredStreams}
+                      onTogglePause={(id) => void handleTogglePause(id)}
+                      onRetryTransfer={handleRetryOrRedownload}
+                      onRemove={(id) => void handleRemove(id)}
+                      onClearCompleted={() => void handleClearCompleted()}
+                      onMoveItem={(id, dir) => {
+                        setDownloads((prev) => {
+                          const idx = prev.findIndex((d) => d.id === id);
+                          if (idx === -1) return prev;
+                          const target = dir === 'up' ? idx - 1 : idx + 1;
+                          if (target < 0 || target >= prev.length) return prev;
+                          const copy = [...prev];
+                          const [moved] = copy.splice(idx, 1);
+                          copy.splice(target, 0, moved);
+                          return copy;
+                        });
+                      }}
+                      onPauseAll={() => void handlePauseAll()}
+                      onResumeAll={() => void handleResumeAll()}
+                      onUpdateTrack={(id, quality, language) => {
+                        setDownloads((prev) =>
+                          prev.map((d) =>
+                            d.id === id
+                              ? {
+                                  ...d,
+                                  url: d.variantUrls?.[quality] || d.url,
+                                  quality,
+                                  language,
+                                }
+                              : d
+                          )
+                        );
+                        notify(`Selected track: ${quality} · ${language}`);
+                      }}
+                      onToggleAdapter={handleToggleAdapter}
+                      onNotify={notify}
+                      onOpenNetworksView={() => setActiveTab('networks')}
+                    />
+                  )}
+
+                  {activeTab === 'networks' && (
+                    <NetworksView
+                      adapters={adapters}
+                      settings={settings}
+                      totalBytesPerSec={liveAggregateBytesPerSec}
+                      isDownloading={activeDownloadCount > 0}
+                      onToggleAdapter={handleToggleAdapter}
+                      onUpdateAdapter={(id, patch) => {
+                        setAdapters((prev) =>
+                          prev.map((a) => (a.id === id ? { ...a, ...patch } : a))
+                        );
+                      }}
+                      onAddAdapter={(name, interfaceType, maxCapacityMbps) => {
+                        const idx = adapters.length;
+                        const newAdapter: NetworkAdapter = {
+                          id: `adapter-${Date.now()}`,
+                          deviceCode: interfaceType === 'Cellular USB' ? `usb${idx}` : `en${idx}`,
+                          name,
+                          interfaceType,
+                          enabled: true,
+                          maxCapacityMbps,
+                          currentSpeedMbps: 0,
+                          speedCapMbps: null,
+                          dataBudgetGb: null,
+                          budgetPeriod: 'monthly',
+                          usedDataGb: 0,
+                          metered: interfaceType === 'Cellular USB',
+                          shade: 'stripe',
+                          historyMbps: Array(16).fill(0),
+                        };
+                        setAdapters((prev) => [...prev, newAdapter]);
+                        notify(`Added ${name}`);
+                      }}
+                      onUpdateSettings={(patch) => setSettings((prev) => ({ ...prev, ...patch }))}
+                    />
+                  )}
+
+                  {activeTab === 'settings' && (
+                    <SettingsView
+                      plugins={plugins}
+                      settings={settings}
+                      onTogglePlugin={(id) => {
+                        setPlugins((prev) =>
+                          prev.map((p) => (p.id === id ? { ...p, enabled: !p.enabled } : p))
+                        );
+                      }}
+                      onUpdateSettings={(patch) => setSettings((prev) => ({ ...prev, ...patch }))}
+                      onNotify={notify}
+                    />
+                  )}
+                </motion.div>
+              </AnimatePresence>
+            </div>
           </main>
         </div>
+
+        {/* Bottom Status Bar: Progressive — appears only once downloads exist */}
+        {downloads.length > 0 && (
+          <footer className="sticky bottom-0 z-20 h-9 px-4 sm:px-6 border-t border-[#0F241B]/10 dark:border-white/[0.08] bg-white/65 dark:bg-[#070B09]/75 backdrop-blur-xl flex items-center justify-between gap-4 text-[11px] text-[#4D6157] dark:text-[#8E9B95]">
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                type="button"
+                onClick={() => setActiveTab('networks')}
+                className="hover:text-[#156E4B] dark:hover:text-[#3BE098] transition-colors whitespace-nowrap cursor-pointer"
+              >
+                {enabledAdapters.length}/{adapters.length} Networks Bonded · {settings.preferredStreams} streams
+              </button>
+            </div>
+
+            <div className="flex items-center gap-4 font-mono tabular-nums shrink-0">
+              <span className="text-[#126646] dark:text-[#3BE098] font-semibold">
+                Speed {formatSpeedMBps(liveAggregateBytesPerSec)}
+              </span>
+              <span>
+                Active [{activeDownloadCount}/{settings.maxConcurrentDownloads}]
+              </span>
+              {queuedCount > 0 && (
+                <span className="text-[#187A54] dark:text-[#2FD48B]">
+                  Queued [{queuedCount}]
+                </span>
+              )}
+              <span className="hidden sm:inline">Done [{completedCount}]</span>
+            </div>
+          </footer>
+        )}
 
         <AnimatePresence>
           {toast && (
@@ -1249,7 +1763,7 @@ export default function App() {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: 8, scale: 0.98 }}
               transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-              className="fixed bottom-5 right-5 z-50 max-w-sm rounded-xs border border-neutral-700/80 dark:border-neutral-300/80 bg-[#0A0A0A] text-white dark:bg-white dark:text-black px-4 py-2.5 text-xs font-medium shadow-lg"
+              className="fixed bottom-12 right-5 z-50 max-w-sm rounded-xl border border-[#2FD48B]/30 bg-[#0B1712]/90 backdrop-blur-xl text-[#F1F8F4] px-4 py-2.5 text-xs font-medium shadow-[0_12px_32px_rgba(0,0,0,0.45)]"
             >
               {toast}
             </motion.div>

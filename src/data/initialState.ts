@@ -99,7 +99,9 @@ export const INITIAL_PLUGINS: PlexoPlugin[] = [
 export const INITIAL_SETTINGS: PlexoSettings = {
   downloadDirectory: '~/Downloads/MochiDrop',
   chunkSizeMb: 8,
-  maxConnectionsPerAdapter: 6,
+  maxConnectionsPerAdapter: 16,
+  preferredStreams: 16,
+  maxConcurrentDownloads: 2,
   globalSpeedCapMbps: null,
   backupRacing: true,
   diskAwareThrottling: true,

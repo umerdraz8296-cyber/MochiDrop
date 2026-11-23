@@ -579,25 +579,40 @@ export default function App() {
     };
   }, [handleCheckUpdates]);
 
-  // Poll update download progress while downloading installer
+  // Poll live in-app update progress (downloading -> extracting -> hot-reloading)
   useEffect(() => {
-    if (updateDownload.state !== 'downloading') return;
+    if (
+      updateDownload.state !== 'downloading' &&
+      updateDownload.state !== 'extracting' &&
+      updateDownload.state !== 'installing'
+    ) {
+      return;
+    }
     let active = true;
+    let sawServerRestart = false;
     const interval = window.setInterval(async () => {
       try {
         const res = await fetch('/api/updates/status');
         if (!res.ok || !active) return;
         const data = (await res.json()) as { download?: UpdateDownloadStatus };
         if (data.download && active) {
+          // If server restarted after exit code 43 hot-swap, its fresh status is 'idle' -> reload UI into new version!
+          if (sawServerRestart && data.download.state === 'idle') {
+            window.location.reload();
+            return;
+          }
           setUpdateDownload(data.download);
           if (data.download.state === 'ready') {
-            notify('Update downloaded — click Install & Restart to finish');
+            notify('Update downloaded — click Apply & Reload to finish');
           }
         }
       } catch {
-        // retry next tick
+        // Expected briefly (~350ms) while Electron hot-swaps the updated local server
+        if (updateDownload.state === 'installing') {
+          sawServerRestart = true;
+        }
       }
-    }, 500);
+    }, 350);
     return () => {
       active = false;
       window.clearInterval(interval);
@@ -1669,8 +1684,12 @@ export default function App() {
               >
                 <ArrowUpCircle className="h-3.5 w-3.5" />
                 <span>
-                  {updateDownload.state === 'ready'
-                    ? 'Install Update'
+                  {updateDownload.state === 'installing'
+                    ? 'Reloading...'
+                    : updateDownload.state === 'extracting'
+                    ? 'Applying...'
+                    : updateDownload.state === 'ready'
+                    ? 'Apply Update'
                     : updateDownload.state === 'downloading'
                     ? `Updating ${updateDownload.percent}%`
                     : `Update ${updateInfo.releaseTag}`}
@@ -1746,7 +1765,13 @@ export default function App() {
                     onClick={() => setUpdateModalOpen(true)}
                     className="h-7 px-3 rounded-lg bg-[#1C6B4D] hover:bg-[#16593F] dark:bg-[#1A5E44] dark:hover:bg-[#217455] border border-[#2FD48B]/40 text-white text-[11px] font-semibold cursor-pointer transition-colors"
                   >
-                    {updateDownload.state === 'ready' ? 'Install & Restart' : 'Download & Update'}
+                    {updateDownload.state === 'installing'
+                      ? 'Reloading...'
+                      : updateDownload.state === 'extracting'
+                      ? 'Applying Update...'
+                      : updateDownload.state === 'ready'
+                      ? 'Apply & Reload'
+                      : 'Update Now'}
                   </button>
                   <button
                     type="button"

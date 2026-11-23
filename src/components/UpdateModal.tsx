@@ -38,8 +38,15 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
   onInstallNow,
 }) => {
   const isDownloading = downloadStatus.state === 'downloading';
+  const isExtracting = downloadStatus.state === 'extracting';
   const isReady = downloadStatus.state === 'ready';
   const isInstalling = downloadStatus.state === 'installing';
+  const isBusy = isDownloading || isExtracting || isInstalling;
+
+  const activeAsset =
+    updateInfo?.isDesktopApp && updateInfo?.supportsInAppUpdate && updateInfo?.inAppUpdateAsset
+      ? updateInfo.inAppUpdateAsset
+      : updateInfo?.recommendedAsset || null;
 
   const publishedDate = updateInfo?.publishedAt
     ? new Date(updateInfo.publishedAt).toLocaleDateString(undefined, {
@@ -58,7 +65,9 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.18 }}
-          onClick={onClose}
+          onClick={() => {
+            if (!isBusy) onClose();
+          }}
           className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4"
         >
           <motion.div
@@ -89,14 +98,16 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={onClose}
-                aria-label="Close update dialog"
-                className="p-1.5 rounded-lg text-[#52655C] dark:text-[#8E9B95] hover:text-[#111B16] dark:hover:text-white hover:bg-black/[0.05] dark:hover:bg-white/[0.08] cursor-pointer"
-              >
-                <X className="h-4 w-4" />
-              </button>
+              {!isBusy && (
+                <button
+                  type="button"
+                  onClick={onClose}
+                  aria-label="Close update dialog"
+                  className="p-1.5 rounded-lg text-[#52655C] dark:text-[#8E9B95] hover:text-[#111B16] dark:hover:text-white hover:bg-black/[0.05] dark:hover:bg-white/[0.08] cursor-pointer"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
             </div>
 
             {/* Body */}
@@ -118,22 +129,26 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
                 </div>
               </div>
 
-              {/* Recommended Installer Info */}
-              {updateInfo.recommendedAsset && (
+              {/* Active Update Package Info */}
+              {activeAsset && (
                 <div className="rounded-xl border border-[#0F241B]/10 dark:border-white/[0.08] bg-white/60 dark:bg-white/[0.03] px-3.5 py-2.5 flex items-center justify-between gap-3 text-xs">
                   <div className="min-w-0">
                     <p className="font-semibold text-[#111B16] dark:text-white truncate">
-                      {updateInfo.recommendedAsset.name}
+                      {updateInfo.supportsInAppUpdate && updateInfo.inAppUpdateAsset
+                        ? `In-App Update Package (${updateInfo.releaseTag})`
+                        : activeAsset.name}
                     </p>
                     <p className="text-[11px] font-mono text-[#52655C] dark:text-[#8A9891]">
-                      Matched for {updateInfo.platform} ({updateInfo.arch})
-                      {updateInfo.recommendedAsset.sizeBytes > 0
-                        ? ` · ${formatBytes(updateInfo.recommendedAsset.sizeBytes)}`
-                        : ''}
+                      {updateInfo.supportsInAppUpdate && updateInfo.inAppUpdateAsset
+                        ? 'Updates directly inside MochiDrop — no installer wizard'
+                        : updateInfo.isDesktopApp && updateInfo.platform === 'win32'
+                        ? 'Silent background update — no setup wizard'
+                        : `Matched for ${updateInfo.platform} (${updateInfo.arch})`}
+                      {activeAsset.sizeBytes > 0 ? ` · ${formatBytes(activeAsset.sizeBytes)}` : ''}
                     </p>
                   </div>
                   <a
-                    href={updateInfo.recommendedAsset.downloadUrl}
+                    href={activeAsset.downloadUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-[11px] font-medium text-[#156E4B] dark:text-[#3BE098] hover:underline inline-flex items-center gap-1 shrink-0"
@@ -144,31 +159,38 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
                 </div>
               )}
 
-              {/* Live Download Progress */}
-              {(isDownloading || isReady || isInstalling) && (
+              {/* Live In-App Download / Extract / Apply Progress */}
+              {(isDownloading || isExtracting || isReady || isInstalling) && (
                 <div className="rounded-xl border border-[#1C6B4D]/25 dark:border-[#2FD48B]/30 bg-[#E8F8F0]/60 dark:bg-[#0D211A]/60 p-3.5 space-y-2">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-semibold text-[#126646] dark:text-[#3BE098] inline-flex items-center gap-1.5">
+                  <div className="flex items-center justify-between text-xs gap-2">
+                    <span className="font-semibold text-[#126646] dark:text-[#3BE098] inline-flex items-center gap-1.5 min-w-0 truncate">
                       {isReady ? (
-                        <CheckCircle2 className="h-3.5 w-3.5" />
+                        <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
                       ) : (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
                       )}
-                      {isInstalling
-                        ? 'Launching installer...'
-                        : isReady
-                        ? 'Update downloaded & ready to install'
-                        : `Downloading ${downloadStatus.filename || 'update'}...`}
+                      <span className="truncate">
+                        {downloadStatus.stageLabel ||
+                          (isInstalling
+                            ? 'Applying update & reloading MochiDrop...'
+                            : isExtracting
+                            ? 'Extracting & verifying update...'
+                            : isReady
+                            ? 'Update downloaded & ready to apply'
+                            : `Downloading ${downloadStatus.filename || 'update'}...`)}
+                      </span>
                     </span>
-                    <span className="font-mono text-[11px] font-bold tabular-nums text-[#126646] dark:text-[#3BE098]">
+                    <span className="font-mono text-[11px] font-bold tabular-nums text-[#126646] dark:text-[#3BE098] shrink-0">
                       {downloadStatus.percent}%
                     </span>
                   </div>
 
                   <div className="h-2 w-full rounded-full bg-black/10 dark:bg-white/[0.1] overflow-hidden">
                     <div
-                      style={{ width: `${downloadStatus.percent}%` }}
-                      className="h-full rounded-full bg-gradient-to-r from-[#1A6B4D] to-[#3BE098] transition-all duration-300"
+                      style={{ width: `${Math.max(isExtracting || isInstalling ? 100 : 0, downloadStatus.percent)}%` }}
+                      className={`h-full rounded-full bg-gradient-to-r from-[#1A6B4D] to-[#3BE098] transition-all duration-300 ${
+                        isExtracting || isInstalling ? 'animate-pulse' : ''
+                      }`}
                     />
                   </div>
 
@@ -191,11 +213,11 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
                 </div>
               ) : null}
 
-              {/* All Other Platform Assets (when browsing on web or wanting portable) */}
-              {updateInfo.allAssets.length > 1 && (
+              {/* All Other Platform Assets */}
+              {updateInfo.allAssets.length > 1 && !isBusy && (
                 <details className="text-xs">
                   <summary className="cursor-pointer text-[#52655C] dark:text-[#8E9B95] hover:text-[#156E4B] dark:hover:text-[#3BE098] font-medium">
-                    All release installers ({updateInfo.allAssets.length})
+                    All release packages ({updateInfo.allAssets.length})
                   </summary>
                   <div className="mt-2 divide-y divide-[#0F241B]/8 dark:divide-white/[0.07] rounded-xl border border-[#0F241B]/10 dark:border-white/[0.08] bg-white/50 dark:bg-black/30">
                     {updateInfo.allAssets.map((asset) => (
@@ -254,7 +276,7 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
               </div>
 
               <div className="flex items-center gap-2">
-                {updateInfo.updateAvailable && (
+                {updateInfo.updateAvailable && !isBusy && (
                   <button
                     type="button"
                     onClick={onRemindLater}
@@ -276,25 +298,31 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
                     ) : (
                       <Rocket className="h-3.5 w-3.5" />
                     )}
-                    Install &amp; Restart
+                    Apply &amp; Reload
                   </button>
-                ) : updateInfo.updateAvailable && updateInfo.isDesktopApp && updateInfo.recommendedAsset ? (
+                ) : updateInfo.updateAvailable && updateInfo.isDesktopApp && activeAsset ? (
                   <button
                     type="button"
-                    disabled={isDownloading}
-                    onClick={() => onStartDownload(updateInfo.recommendedAsset?.name)}
+                    disabled={isBusy}
+                    onClick={() => onStartDownload()}
                     className="h-9 px-4 rounded-xl bg-[#1C6B4D] hover:bg-[#16593F] dark:bg-[#1A5E44]/95 dark:hover:bg-[#217455] border border-[#2FD48B]/45 text-white text-xs font-semibold shadow-[0_0_20px_rgba(34,197,126,0.22)] inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-55"
                   >
-                    {isDownloading ? (
+                    {isBusy ? (
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
                     ) : (
-                      <Download className="h-3.5 w-3.5" />
+                      <Rocket className="h-3.5 w-3.5" />
                     )}
-                    {isDownloading ? `Downloading (${downloadStatus.percent}%)` : 'Download & Update'}
+                    {isInstalling
+                      ? 'Reloading MochiDrop...'
+                      : isExtracting
+                      ? 'Applying Update...'
+                      : isDownloading
+                      ? `Downloading (${downloadStatus.percent}%)`
+                      : 'Update Now'}
                   </button>
-                ) : updateInfo.updateAvailable && updateInfo.recommendedAsset ? (
+                ) : updateInfo.updateAvailable && activeAsset ? (
                   <a
-                    href={updateInfo.recommendedAsset.downloadUrl}
+                    href={activeAsset.downloadUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="h-9 px-4 rounded-xl bg-[#1C6B4D] hover:bg-[#16593F] dark:bg-[#1A5E44]/95 dark:hover:bg-[#217455] border border-[#2FD48B]/45 text-white text-xs font-semibold shadow-[0_0_20px_rgba(34,197,126,0.22)] inline-flex items-center gap-1.5"

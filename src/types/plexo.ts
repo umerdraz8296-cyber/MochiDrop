@@ -137,8 +137,10 @@ export interface UpdateCheckInfo {
   publishedAt: string | null;
   releaseUrl: string;
   isDesktopApp: boolean;
+  supportsInAppUpdate?: boolean;
   platform: string;
   arch: string;
+  inAppUpdateAsset?: ReleaseAssetInfo | null;
   recommendedAsset: ReleaseAssetInfo | null;
   allAssets: ReleaseAssetInfo[];
   checkedAt: number;
@@ -146,7 +148,9 @@ export interface UpdateCheckInfo {
 }
 
 export interface UpdateDownloadStatus {
-  state: 'idle' | 'downloading' | 'ready' | 'installing' | 'error';
+  state: 'idle' | 'downloading' | 'extracting' | 'ready' | 'installing' | 'error';
+  mode?: 'in-app' | 'silent-installer' | 'manual';
+  stageLabel?: string | null;
   version: string | null;
   filename: string | null;
   downloadedBytes: number;

@@ -77,6 +77,7 @@ jobs:
         run: |
           node -e '
             const fs = require("fs");
+            const crypto = require("crypto");
             const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
             pkg.name = "mochidrop";
             pkg.version = process.env.RELEASE_VER || "1.0.0";
@@ -86,8 +87,26 @@ jobs:
             if (process.env.GITHUB_REPO) {
               pkg.mochidropRepo = process.env.GITHUB_REPO;
             }
+            const sortedDeps = Object.keys(pkg.dependencies || {})
+              .sort()
+              .reduce((acc, k) => { acc[k] = pkg.dependencies[k]; return acc; }, {});
+            pkg.mochidropDepsHash = crypto
+              .createHash("sha256")
+              .update(JSON.stringify(sortedDeps))
+              .digest("hex")
+              .slice(0, 16);
             fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2));
           '
+
+      - name: Package lightweight in-app update bundle
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        env:
+          RELEASE_VER: ${{ needs.compute-version.outputs.version }}
+        run: |
+          mkdir -p release
+          tar -czf "release/MochiDrop-${RELEASE_VER}-update.tar.gz" dist package.json
+          ls -lh "release/MochiDrop-${RELEASE_VER}-update.tar.gz"
 
       - name: Install Electron desktop packager
         run: npm install --legacy-peer-deps --save-dev electron@33.3.1 electron-builder@25.1.8
@@ -106,6 +125,7 @@ jobs:
             release/*.exe
             release/*.dmg
             release/*.AppImage
+            release/*.tar.gz
 
   publish-release:
     name: Publish GitHub Release
@@ -137,3 +157,4 @@ jobs:
             all-installers/*.exe
             all-installers/*.dmg
             all-installers/*.AppImage
+            all-installers/*.tar.gz

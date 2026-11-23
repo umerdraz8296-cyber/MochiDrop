@@ -45,6 +45,21 @@ import {
   type YouTubePlaylistInspectResult,
   type YouTubeResolutionOption,
 } from './src/server/youtubeEngine.ts';
+import {
+  getLiveNetworkSnapshot,
+  getLiveNetworkSnapshotAsync,
+  isCloudHostedEnvironment,
+  rescanNetworkAdapters,
+  toggleNetworkAdapter,
+  updateClientBrowserNetworkHint,
+  type ClientNetworkSlotHint,
+} from './src/server/networkMonitor.ts';
+import {
+  checkForGithubUpdate,
+  getUpdateDownloadStatus,
+  launchDownloadedUpdate,
+  startUpdateDownload,
+} from './src/server/updateService.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -466,6 +481,95 @@ async function startServer() {
     res.json({ ok: true, service: 'mochidrop' });
   });
 
+  function applyValidatedClientNetworkHint(source: Record<string, unknown> | undefined) {
+    if (!source || !isCloudHostedEnvironment()) return;
+    const rawType = typeof source.clientType === 'string' ? source.clientType.trim().toLowerCase() : '';
+    const slot: ClientNetworkSlotHint | undefined =
+      rawType === 'wifi' || rawType === 'ethernet' || rawType === 'usb' ? rawType : undefined;
+    const rawOnline = source.online;
+    const online =
+      typeof rawOnline === 'boolean'
+        ? rawOnline
+        : rawOnline === '0' || rawOnline === 'false'
+        ? false
+        : rawOnline === '1' || rawOnline === 'true'
+        ? true
+        : undefined;
+    const rawDownlink = Number(source.downlink);
+    const downlinkMbps =
+      Number.isFinite(rawDownlink) && rawDownlink >= 0 && rawDownlink <= 10_000
+        ? rawDownlink
+        : undefined;
+    if (slot !== undefined || online !== undefined || downlinkMbps !== undefined) {
+      updateClientBrowserNetworkHint({ slot, online, downlinkMbps });
+    }
+  }
+
+  // Real OS connected network interfaces & live per-interface throughput
+  app.get('/api/networks', async (req, res) => {
+    applyValidatedClientNetworkHint(req.query as Record<string, unknown>);
+    const networks = await getLiveNetworkSnapshotAsync();
+    res.json({ networks, cloudHosted: isCloudHostedEnvironment() });
+  });
+
+  app.post('/api/networks/rescan', async (req, res) => {
+    applyValidatedClientNetworkHint(
+      (req.body && typeof req.body === 'object' ? req.body : req.query) as Record<string, unknown>
+    );
+    const networks = await rescanNetworkAdapters();
+    res.json({ networks, cloudHosted: isCloudHostedEnvironment() });
+  });
+
+  app.post('/api/networks/:id/toggle', (req, res) => {
+    const id = typeof req.params.id === 'string' ? req.params.id.trim() : '';
+    if (!id || id.length > 80) {
+      res.status(400).json({ error: 'Invalid network adapter ID.' });
+      return;
+    }
+    const networks = toggleNetworkAdapter(id);
+    res.json({ networks, cloudHosted: isCloudHostedEnvironment() });
+  });
+
+  // GitHub Releases Update Checker & Desktop Installer Downloader
+  app.get('/api/updates/check', async (req, res) => {
+    const force = req.query.force === '1' || req.query.force === 'true';
+    const info = await checkForGithubUpdate(force);
+    res.json({
+      update: info,
+      download: getUpdateDownloadStatus(),
+    });
+  });
+
+  app.get('/api/updates/status', (_req, res) => {
+    res.json({ download: getUpdateDownloadStatus() });
+  });
+
+  app.post('/api/updates/download', async (req, res) => {
+    const assetName =
+      typeof req.body?.assetName === 'string' && req.body.assetName.trim().length <= 160
+        ? req.body.assetName.trim()
+        : undefined;
+    try {
+      const status = await startUpdateDownload(assetName);
+      res.json({ download: status });
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : 'Could not start update download.',
+      });
+    }
+  });
+
+  app.post('/api/updates/install', (_req, res) => {
+    try {
+      const result = launchDownloadedUpdate();
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : 'Could not launch update installer.',
+      });
+    }
+  });
+
   app.post('/api/inspect', async (req, res) => {
     const rawUrl = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
     try {
@@ -644,7 +748,7 @@ async function startServer() {
   });
 
   app.get('/api/transfers', (_req, res) => {
-    res.json({ transfers: listTransfers() });
+    res.json({ transfers: listTransfers(), networks: getLiveNetworkSnapshot() });
   });
 
   app.get('/api/transfers/:id/file', async (req, res) => {

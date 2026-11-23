@@ -67,9 +67,19 @@ async function startLocalServer(port) {
       PORT: String(port),
       APP_URL: `http://127.0.0.1:${port}`,
       MOCHIDROP_DATA_DIR: downloadsDir,
+      MOCHIDROP_APP_VERSION: app.getVersion(),
+      MOCHIDROP_IS_DESKTOP: '1',
+      MOCHIDROP_PLATFORM: process.platform,
+      MOCHIDROP_ARCH: process.arch,
     },
     stdio: 'ignore',
     windowsHide: true,
+  });
+
+  serverProcess.on('exit', (code) => {
+    if (code === 42) {
+      app.quit();
+    }
   });
 
   await waitForHealth(port);

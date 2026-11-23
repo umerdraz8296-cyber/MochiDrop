@@ -73,6 +73,7 @@ jobs:
         shell: bash
         env:
           RELEASE_VER: ${{ needs.compute-version.outputs.version }}
+          GITHUB_REPO: ${{ github.repository }}
         run: |
           node -e '
             const fs = require("fs");
@@ -82,6 +83,9 @@ jobs:
             pkg.description = "MochiDrop Desktop Download Manager and Media Streamer";
             pkg.author = "MochiDrop";
             pkg.main = "electron/main.cjs";
+            if (process.env.GITHUB_REPO) {
+              pkg.mochidropRepo = process.env.GITHUB_REPO;
+            }
             fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2));
           '
 

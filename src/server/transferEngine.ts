@@ -2,6 +2,8 @@ import crypto from 'node:crypto';
 import dns from 'node:dns/promises';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import http from 'node:http';
+import https from 'node:https';
 import net from 'node:net';
 import path from 'node:path';
 import type express from 'express';
@@ -15,6 +17,12 @@ import {
   sniffInitialBytes,
 } from './urlParser.ts';
 import { inferPlayableMimeType } from './mediaPlayer.ts';
+import {
+  getEnabledAdaptersForTransfer,
+  getPrimaryEnabledAdapter,
+  markAdapterBindFailed,
+  recordAdapterNetworkBytes,
+} from './networkMonitor.ts';
 import { isYouTubeVideoUrl, startYouTubeBackgroundTransfer } from './youtubeEngine.ts';
 
 const BROWSER_USER_AGENT =
@@ -47,6 +55,7 @@ export interface ServerChunkProgress {
   index: number;
   progress: number; // 0..100
   workerIndex: number;
+  adapterId?: string;
 }
 
 export interface ProbeResult {
@@ -100,6 +109,8 @@ export interface TransferRecord {
   paused: boolean;
   abortController: AbortController | null;
   speedSamples: Array<{ ts: number; bytes: number }>;
+  startedDownloadingAt: number | null;
+  smoothedSpeedBytesPerSec: number;
   cookies: Record<string, string>;
   referer: string | null;
   filePath: string | null;
@@ -753,25 +764,53 @@ function pruneOldTransfers() {
   }
 }
 
-export function recordBytesSent(rec: TransferRecord, bytes: number) {
-  const now = Date.now();
-  rec.downloadedBytes += bytes;
-  rec.updatedAt = now;
-  rec.speedSamples.push({ ts: now, bytes });
+const SPEED_WINDOW_MS = 3000;
 
-  const cutoff = now - 2000;
+function recomputeTransferSpeed(rec: TransferRecord, now: number) {
+  const cutoff = now - SPEED_WINDOW_MS;
   while (rec.speedSamples.length > 0 && rec.speedSamples[0].ts < cutoff) {
     rec.speedSamples.shift();
   }
 
   if (rec.speedSamples.length === 0) {
+    rec.smoothedSpeedBytesPerSec = 0;
     rec.speedBytesPerSec = 0;
-  } else {
-    const windowBytes = rec.speedSamples.reduce((sum, s) => sum + s.bytes, 0);
-    const oldestTs = rec.speedSamples[0].ts;
-    const elapsedSec = Math.max(0.35, (now - oldestTs) / 1000);
-    rec.speedBytesPerSec = windowBytes / elapsedSec;
+    return;
   }
+
+  const windowBytes = rec.speedSamples.reduce((sum, s) => sum + s.bytes, 0);
+  // Fixed 3-second sliding window (clamped to actual elapsed time only during the first 3 seconds)
+  // Prevents chunk-completion bursts from inflating speed by dividing by tiny inter-sample gaps.
+  const elapsedSinceStartSec = rec.startedDownloadingAt
+    ? (now - rec.startedDownloadingAt) / 1000
+    : SPEED_WINDOW_MS / 1000;
+  const effectiveWindowSec = Math.min(
+    SPEED_WINDOW_MS / 1000,
+    Math.max(1.0, elapsedSinceStartSec)
+  );
+  const instantSpeed = windowBytes / effectiveWindowSec;
+
+  if (rec.smoothedSpeedBytesPerSec <= 0) {
+    rec.smoothedSpeedBytesPerSec = instantSpeed;
+  } else {
+    rec.smoothedSpeedBytesPerSec = rec.smoothedSpeedBytesPerSec * 0.5 + instantSpeed * 0.5;
+  }
+  rec.speedBytesPerSec = rec.smoothedSpeedBytesPerSec;
+}
+
+export function recordBytesSent(rec: TransferRecord, bytes: number, adapterId?: string) {
+  if (bytes <= 0) return;
+  const now = Date.now();
+  if (rec.startedDownloadingAt === null) {
+    rec.startedDownloadingAt = now;
+  }
+  rec.downloadedBytes += bytes;
+  rec.updatedAt = now;
+  rec.speedSamples.push({ ts: now, bytes });
+  recomputeTransferSpeed(rec, now);
+
+  // Credit exact real network bytes to the OS adapter that carried them
+  recordAdapterNetworkBytes(adapterId, bytes);
 
   if (rec.streamType !== 'hls') {
     updateChunkMapFromProgress(rec);
@@ -781,21 +820,18 @@ export function recordBytesSent(rec: TransferRecord, bytes: number) {
 function refreshIdleSpeed(rec: TransferRecord) {
   if (rec.status !== 'downloading') {
     rec.speedBytesPerSec = 0;
+    rec.smoothedSpeedBytesPerSec = 0;
     return;
   }
-  const now = Date.now();
-  const cutoff = now - 2200;
-  while (rec.speedSamples.length > 0 && rec.speedSamples[0].ts < cutoff) {
-    rec.speedSamples.shift();
-  }
-  if (rec.speedSamples.length === 0) {
-    rec.speedBytesPerSec = 0;
-  }
+  recomputeTransferSpeed(rec, Date.now());
 }
 
 export function updateChunkMapFromProgress(
   rec: TransferRecord,
-  inFlightMap?: Map<number, { start: number; end: number; received: number; workerIndex: number }>
+  inFlightMap?: Map<
+    number,
+    { start: number; end: number; received: number; workerIndex: number; adapterId?: string }
+  >
 ) {
   const SLOTS = 32;
   if (rec.totalBytes <= 0) {
@@ -803,26 +839,33 @@ export function updateChunkMapFromProgress(
       rec.status === 'completed'
         ? SLOTS
         : Math.min(SLOTS - 1, Math.floor(rec.downloadedBytes / (1024 * 1024)) % SLOTS);
+    const primaryId = getPrimaryEnabledAdapter()?.id;
     rec.chunks = Array.from({ length: SLOTS }, (_, idx) => ({
       index: idx,
       progress: rec.status === 'completed' ? 100 : idx < filled ? 100 : idx === filled ? 50 : 0,
       workerIndex: idx % Math.max(1, rec.parallelStreams),
+      adapterId: primaryId,
     }));
     return;
   }
 
   const slotBytes = rec.totalBytes / SLOTS;
+  const activeAdapters = getEnabledAdaptersForTransfer();
   rec.chunks = Array.from({ length: SLOTS }, (_, idx) => {
     const slotStart = idx * slotBytes;
     const slotEnd = (idx + 1) * slotBytes;
+    const fallbackAdapterId =
+      activeAdapters.length > 0
+        ? activeAdapters[idx % activeAdapters.length].id
+        : undefined;
 
     let pct = 0;
     if (rec.status === 'completed') {
       pct = 100;
     } else if (inFlightMap && inFlightMap.size > 0) {
-      // When true parallel byte-range workers are active, reflect per-segment progress accurately
       let coveredBytes = 0;
       let workerIndex = idx % Math.max(1, rec.parallelStreams);
+      let matchedAdapterId: string | undefined = rec.chunks[idx]?.adapterId || fallbackAdapterId;
       for (const info of inFlightMap.values()) {
         const chunkLoadedEnd = info.start + info.received;
         if (chunkLoadedEnd > slotStart && info.start < slotEnd) {
@@ -831,6 +874,7 @@ export function updateChunkMapFromProgress(
           if (overlapEnd > overlapStart) {
             coveredBytes += overlapEnd - overlapStart;
             workerIndex = info.workerIndex;
+            if (info.adapterId) matchedAdapterId = info.adapterId;
           }
         }
       }
@@ -845,6 +889,7 @@ export function updateChunkMapFromProgress(
         index: idx,
         progress: pct,
         workerIndex,
+        adapterId: matchedAdapterId,
       };
     } else if (rec.downloadedBytes >= slotEnd) {
       pct = 100;
@@ -856,6 +901,7 @@ export function updateChunkMapFromProgress(
       index: idx,
       progress: pct,
       workerIndex: idx % Math.max(1, rec.parallelStreams),
+      adapterId: rec.chunks[idx]?.adapterId || fallbackAdapterId,
     };
   });
 }
@@ -1027,6 +1073,8 @@ export async function createTransfer(params: {
       paused: false,
       abortController: null,
       speedSamples: [],
+      startedDownloadingAt: null,
+      smoothedSpeedBytesPerSec: 0,
       cookies: {},
       referer: null,
       filePath: diskFilePath,
@@ -1171,6 +1219,8 @@ export async function createTransfer(params: {
     paused: false,
     abortController: null,
     speedSamples: [],
+    startedDownloadingAt: null,
+    smoothedSpeedBytesPerSec: 0,
     cookies: probe.cookies || {},
     referer: probe.referer || null,
     filePath: diskFilePath,
@@ -1347,8 +1397,160 @@ function sendAttachmentHeaders(res: express.Response, rec: TransferRecord, inclu
 }
 
 /**
- * Fetches an exact byte range [start, end] completely, automatically resuming sub-ranges
- * and retrying with backoff if a Cloudflare Worker or CDN drops the connection mid-chunk.
+ * Fetches an HTTP/HTTPS stream bound to a specific OS network interface's localAddress IPv4
+ * (enabling true multi-network bonding across e.g. Wi-Fi + Ethernet simultaneously) with
+ * SSRF validation on every redirect hop.
+ */
+async function safeNodeRequestBoundToInterface(
+  initialUrl: string,
+  options: {
+    localAddress: string;
+    headers?: Record<string, string>;
+    cookies?: Record<string, string>;
+    referer?: string | null;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }
+): Promise<{
+  status: number;
+  contentType: string;
+  stream: http.IncomingMessage;
+  cookies: Record<string, string>;
+  finalUrl: string;
+}> {
+  const {
+    localAddress,
+    headers: extraHeaders = {},
+    cookies: initialCookies,
+    referer: initialReferer = null,
+    timeoutMs = 25000,
+    signal,
+  } = options;
+
+  const cookieJar: Record<string, string> = { ...(initialCookies || {}) };
+  let currentUrl = initialUrl;
+  let currentHost = '';
+  let prevUrl: string | null = initialReferer;
+  const visited = new Set<string>();
+
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    if (signal?.aborted) throw new Error('Transfer aborted');
+    const parsed = new URL(currentUrl);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error('Only HTTP/HTTPS links are supported.');
+    }
+    if (visited.has(parsed.href)) {
+      throw new Error('Redirect loop detected.');
+    }
+    visited.add(parsed.href);
+
+    const safe = await canSafelyProbePublicHost(parsed.hostname);
+    if (!safe) {
+      throw new Error('Blocked private network host.');
+    }
+
+    const reqHeaders: Record<string, string> = {
+      'User-Agent': BROWSER_USER_AGENT,
+      Accept: '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      ...extraHeaders,
+    };
+    if (prevUrl && !reqHeaders.Referer) {
+      reqHeaders.Referer = prevUrl;
+    }
+    if (
+      Object.keys(cookieJar).length > 0 &&
+      (!currentHost || shareSiteOrHost(currentHost, parsed.hostname)) &&
+      !reqHeaders.Cookie
+    ) {
+      reqHeaders.Cookie = formatCookieHeader(cookieJar);
+    }
+
+    const res = await new Promise<http.IncomingMessage>((resolve, reject) => {
+      const mod = parsed.protocol === 'https:' ? https : http;
+      const req = mod.request(
+        parsed,
+        {
+          method: 'GET',
+          headers: reqHeaders,
+          localAddress,
+          timeout: timeoutMs,
+        },
+        (incoming) => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve(incoming);
+        }
+      );
+
+      const onAbort = () => {
+        req.destroy(new Error('Transfer aborted'));
+      };
+      if (signal) {
+        if (signal.aborted) {
+          req.destroy(new Error('Transfer aborted'));
+          reject(new Error('Transfer aborted'));
+          return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      req.on('timeout', () => {
+        req.destroy(new Error('Interface request timeout'));
+      });
+      req.on('error', (err) => {
+        signal?.removeEventListener('abort', onAbort);
+        reject(err);
+      });
+      req.end();
+    });
+
+    const setCookies = res.headers['set-cookie'];
+    if (Array.isArray(setCookies)) {
+      for (const entry of setCookies) {
+        const firstPair = entry.split(';')[0]?.trim();
+        if (!firstPair) continue;
+        const eqIdx = firstPair.indexOf('=');
+        if (eqIdx > 0) {
+          cookieJar[firstPair.slice(0, eqIdx).trim()] = firstPair.slice(eqIdx + 1).trim();
+        }
+      }
+    }
+    currentHost = parsed.hostname;
+    const status = res.statusCode || 0;
+
+    if (status === 301 || status === 302 || status === 303 || status === 307 || status === 308) {
+      const loc = res.headers.location;
+      res.resume();
+      if (!loc) {
+        return {
+          status,
+          contentType: String(res.headers['content-type'] || '').toLowerCase(),
+          stream: res,
+          cookies: cookieJar,
+          finalUrl: parsed.href,
+        };
+      }
+      prevUrl = parsed.href;
+      currentUrl = new URL(loc, parsed.href).href;
+      continue;
+    }
+
+    return {
+      status,
+      contentType: String(res.headers['content-type'] || '').toLowerCase(),
+      stream: res,
+      cookies: cookieJar,
+      finalUrl: parsed.href,
+    };
+  }
+
+  throw new Error('Too many redirects from remote server.');
+}
+
+/**
+ * Fetches an exact byte range [start, end] completely, automatically resuming sub-ranges,
+ * binding to real connected OS interfaces when multiple links are active, and recording
+ * live network bytes per incoming TCP packet so real-time speed never spikes artificially.
  */
 async function fetchExactByteRange(
   rec: TransferRecord,
@@ -1356,15 +1558,34 @@ async function fetchExactByteRange(
   end: number,
   workerIndex: number,
   signal: AbortSignal,
-  inFlightMap: Map<number, { start: number; end: number; received: number; workerIndex: number }>,
-  chunkIndex: number
-): Promise<Buffer> {
+  inFlightMap: Map<
+    number,
+    { start: number; end: number; received: number; workerIndex: number; adapterId?: string }
+  >,
+  chunkIndex: number,
+  recordLiveBytes = false
+): Promise<{ buffer: Buffer; adapterId?: string }> {
   const expectedLength = end - start + 1;
   const parts: Buffer[] = [];
   let received = 0;
   const maxAttempts = 8;
 
-  inFlightMap.set(chunkIndex, { start, end, received: 0, workerIndex });
+  const activeAdapters = getEnabledAdaptersForTransfer();
+  const assignedAdapter =
+    activeAdapters.length > 0
+      ? activeAdapters[workerIndex % activeAdapters.length]
+      : null;
+  let effectiveAdapterId = assignedAdapter?.id;
+  let useLocalBinding =
+    activeAdapters.length > 1 && Boolean(assignedAdapter?.ipAddress);
+
+  inFlightMap.set(chunkIndex, {
+    start,
+    end,
+    received: 0,
+    workerIndex,
+    adapterId: effectiveAdapterId,
+  });
 
   try {
     for (let attempt = 1; attempt <= maxAttempts && received < expectedLength; attempt++) {
@@ -1375,6 +1596,104 @@ async function fetchExactByteRange(
       const targetUrl = attempt % 2 === 1 ? rec.resolvedUrl : rec.url;
 
       try {
+        if (useLocalBinding && assignedAdapter?.ipAddress) {
+          let bound;
+          try {
+            bound = await safeNodeRequestBoundToInterface(targetUrl, {
+              localAddress: assignedAdapter.ipAddress,
+              headers: { Range: `bytes=${reqStart}-${end}` },
+              cookies: rec.cookies,
+              referer: rec.referer,
+              timeoutMs: 20000,
+              signal,
+            });
+          } catch (bindErr) {
+            if (signal.aborted) throw bindErr;
+            // If this specific OS interface has no route to the internet (e.g. LAN-only),
+            // mark it temporarily unreachable and fall back cleanly to the primary route.
+            markAdapterBindFailed(assignedAdapter.id);
+            useLocalBinding = false;
+            effectiveAdapterId = getPrimaryEnabledAdapter()?.id;
+            inFlightMap.set(chunkIndex, {
+              start,
+              end,
+              received,
+              workerIndex,
+              adapterId: effectiveAdapterId,
+            });
+            continue;
+          }
+
+          rec.cookies = bound.cookies;
+          if (bound.status !== 206 && !(bound.status === 200 && reqStart === 0)) {
+            bound.stream.resume();
+            if (
+              bound.status === 401 ||
+              bound.status === 403 ||
+              bound.status === 404 ||
+              bound.status === 410
+            ) {
+              rec.httpStatus = bound.status;
+              throw new Error(describeHttpError(bound.status));
+            }
+            throw new Error(`Chunk range HTTP ${bound.status}`);
+          }
+
+          if (rec.expectedBinary && bound.contentType.includes('text/html') && expectedLength > 200 * 1024) {
+            bound.stream.resume();
+            throw new Error(
+              'Remote link returned an HTML webpage instead of the media file. The signed link may have expired.'
+            );
+          }
+
+          await new Promise<void>((resolve, reject) => {
+            const onAbort = () => {
+              bound.stream.destroy();
+              reject(new Error('Transfer aborted'));
+            };
+            signal.addEventListener('abort', onAbort, { once: true });
+
+            bound.stream.on('data', (chunk: Buffer) => {
+              if (signal.aborted) {
+                bound.stream.destroy();
+                return;
+              }
+              if (chunk.byteLength > 0 && received < expectedLength) {
+                const needed = expectedLength - received;
+                const take = chunk.byteLength > needed ? chunk.subarray(0, needed) : chunk;
+                parts.push(Buffer.from(take));
+                received += take.byteLength;
+                if (recordLiveBytes) {
+                  recordBytesSent(rec, take.byteLength, effectiveAdapterId);
+                }
+                inFlightMap.set(chunkIndex, {
+                  start,
+                  end,
+                  received,
+                  workerIndex,
+                  adapterId: effectiveAdapterId,
+                });
+                updateChunkMapFromProgress(rec, inFlightMap);
+                if (received >= expectedLength) {
+                  bound.stream.destroy();
+                  signal.removeEventListener('abort', onAbort);
+                  resolve();
+                }
+              }
+            });
+            bound.stream.on('end', () => {
+              signal.removeEventListener('abort', onAbort);
+              resolve();
+            });
+            bound.stream.on('error', (err) => {
+              signal.removeEventListener('abort', onAbort);
+              if (received >= expectedLength) resolve();
+              else reject(err);
+            });
+          });
+          continue;
+        }
+
         const { response, cookies } = await safeFetchWithRedirects(targetUrl, {
           method: 'GET',
           headers: {
@@ -1430,7 +1749,16 @@ async function fetchExactByteRange(
             const take = value.byteLength > needed ? value.subarray(0, needed) : value;
             parts.push(Buffer.from(take));
             received += take.byteLength;
-            inFlightMap.set(chunkIndex, { start, end, received, workerIndex });
+            if (recordLiveBytes) {
+              recordBytesSent(rec, take.byteLength, effectiveAdapterId);
+            }
+            inFlightMap.set(chunkIndex, {
+              start,
+              end,
+              received,
+              workerIndex,
+              adapterId: effectiveAdapterId,
+            });
             updateChunkMapFromProgress(rec, inFlightMap);
             if (received >= expectedLength) {
               await reader.cancel().catch(() => {});
@@ -1463,7 +1791,7 @@ async function fetchExactByteRange(
       throw new Error('Remote server closed the connection before the byte range completed.');
     }
 
-    return Buffer.concat(parts, expectedLength);
+    return { buffer: Buffer.concat(parts, expectedLength), adapterId: effectiveAdapterId };
   } finally {
     inFlightMap.delete(chunkIndex);
   }
@@ -1472,9 +1800,11 @@ async function fetchExactByteRange(
 async function fetchHlsSegmentWithRetry(
   rec: TransferRecord,
   segmentUrl: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  recordLiveBytes = false
 ): Promise<Buffer> {
   const maxAttempts = 6;
+  const adapterId = getPrimaryEnabledAdapter()?.id;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (signal.aborted) throw new Error('Transfer aborted');
     await waitWhilePaused(rec, signal);
@@ -1502,11 +1832,32 @@ async function fetchHlsSegmentWithRetry(
         throw new Error(`Segment HTTP ${st}`);
       }
 
-      const arr = await response.arrayBuffer();
-      if (arr.byteLength === 0) {
+      if (!response.body) {
         throw new Error('Empty media segment');
       }
-      return Buffer.from(arr);
+
+      const reader = response.body.getReader();
+      const parts: Buffer[] = [];
+      let segTotal = 0;
+      while (true) {
+        if (signal.aborted) {
+          await reader.cancel().catch(() => {});
+          throw new Error('Transfer aborted');
+        }
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value && value.byteLength > 0) {
+          parts.push(Buffer.from(value));
+          segTotal += value.byteLength;
+          if (recordLiveBytes) {
+            recordBytesSent(rec, value.byteLength, adapterId);
+          }
+        }
+      }
+      if (segTotal === 0) {
+        throw new Error('Empty media segment');
+      }
+      return Buffer.concat(parts, segTotal);
     } catch (err) {
       if (signal.aborted) throw err;
       const msg = err instanceof Error ? err.message : 'Segment download failed';
@@ -1658,6 +2009,8 @@ export async function streamTransferToResponse(
   rec.streamInitialized = false;
   rec.downloadedBytes = 0;
   rec.speedBytesPerSec = 0;
+  rec.smoothedSpeedBytesPerSec = 0;
+  rec.startedDownloadingAt = null;
   rec.speedSamples = [];
   rec.errorMessage = null;
   rec.retryCount = 0;
@@ -1713,23 +2066,24 @@ export async function streamTransferToResponse(
 
       const inFlightMap = new Map<
         number,
-        { start: number; end: number; received: number; workerIndex: number }
+        { start: number; end: number; received: number; workerIndex: number; adapterId?: string }
       >();
-      const chunkPromises = new Map<number, Promise<Buffer>>();
+      const chunkPromises = new Map<number, Promise<{ buffer: Buffer; adapterId?: string }>>();
 
       const scheduleChunk = (idx: number) => {
         if (idx >= totalChunks || chunkPromises.has(idx)) return;
         const start = idx * chunkBytes;
         const end = Math.min(rec.totalBytes - 1, start + chunkBytes - 1);
         const workerIndex = idx % maxWindow;
-        const p = fetchExactByteRange(rec, start, end, workerIndex, signal, inFlightMap, idx);
+        const p = fetchExactByteRange(rec, start, end, workerIndex, signal, inFlightMap, idx, false);
         p.catch(() => {});
         chunkPromises.set(idx, p);
       };
 
       // Fetch and verify chunk 0 BEFORE sending attachment headers
       scheduleChunk(0);
-      const firstChunk = await chunkPromises.get(0)!;
+      const firstChunkRes = await chunkPromises.get(0)!;
+      const firstChunk = firstChunkRes.buffer;
       chunkPromises.delete(0);
 
       if (signal.aborted || clientAborted) return;
@@ -1772,9 +2126,9 @@ export async function streamTransferToResponse(
           scheduleChunk(lookahead);
         }
 
-        const buf = await chunkPromises.get(nextIdx)!;
+        const chunkRes = await chunkPromises.get(nextIdx)!;
         chunkPromises.delete(nextIdx);
-        await writeBufferRespectingControls(res, buf, rec, signal);
+        await writeBufferRespectingControls(res, chunkRes.buffer, rec, signal);
       }
 
       // Strict byte-count verification — never allow false-positive completion
@@ -2046,7 +2400,8 @@ async function writeBufferToDiskRespectingControls(
   stream: fs.WriteStream,
   buffer: Uint8Array,
   rec: TransferRecord,
-  signal: AbortSignal
+  signal: AbortSignal,
+  alreadyRecorded = false
 ): Promise<void> {
   let offset = 0;
   while (offset < buffer.length) {
@@ -2065,7 +2420,9 @@ async function writeBufferToDiskRespectingControls(
     }
 
     const written = end - offset;
-    recordBytesSent(rec, written);
+    if (!alreadyRecorded) {
+      recordBytesSent(rec, written);
+    }
     offset = end;
 
     if (rec.speedCapMbps && rec.speedCapMbps > 0) {
@@ -2109,6 +2466,8 @@ export function startBackgroundTransfer(rec: TransferRecord): void {
   rec.savedOnDisk = false;
   rec.downloadedBytes = 0;
   rec.speedBytesPerSec = 0;
+  rec.smoothedSpeedBytesPerSec = 0;
+  rec.startedDownloadingAt = null;
   rec.speedSamples = [];
   rec.errorMessage = null;
   rec.retryCount = 0;
@@ -2189,7 +2548,7 @@ export function startBackgroundTransfer(rec: TransferRecord): void {
         const pending = new Map<number, Promise<Buffer>>();
         const schedule = (idx: number) => {
           if (idx >= totalSegments || pending.has(idx)) return;
-          const p = fetchHlsSegmentWithRetry(rec, allUrls[idx], signal);
+          const p = fetchHlsSegmentWithRetry(rec, allUrls[idx], signal, idx > 0);
           p.catch(() => {});
           pending.set(idx, p);
         };
@@ -2207,7 +2566,7 @@ export function startBackgroundTransfer(rec: TransferRecord): void {
         await openPartFile();
         for (let w = 1; w <= maxAhead && w < totalSegments; w++) schedule(w);
 
-        await writeBufferToDiskRespectingControls(writeStream!, firstSeg, rec, signal);
+        await writeBufferToDiskRespectingControls(writeStream!, firstSeg, rec, signal, false);
         let completedSegments = 1;
         updateHlsChunkMap(rec, completedSegments, totalSegments);
 
@@ -2218,7 +2577,7 @@ export function startBackgroundTransfer(rec: TransferRecord): void {
           }
           const segBuf = await pending.get(idx)!;
           pending.delete(idx);
-          await writeBufferToDiskRespectingControls(writeStream!, segBuf, rec, signal);
+          await writeBufferToDiskRespectingControls(writeStream!, segBuf, rec, signal, true);
           completedSegments++;
           updateHlsChunkMap(rec, completedSegments, totalSegments);
         }
@@ -2255,20 +2614,22 @@ export function startBackgroundTransfer(rec: TransferRecord): void {
 
         const inFlightMap = new Map<
           number,
-          { start: number; end: number; received: number; workerIndex: number }
+          { start: number; end: number; received: number; workerIndex: number; adapterId?: string }
         >();
 
         // Verify chunk 0 first before allocating output file
         const firstEnd = Math.min(rec.totalBytes - 1, chunkBytes - 1);
-        const firstChunk = await fetchExactByteRange(
+        const firstChunkRes = await fetchExactByteRange(
           rec,
           0,
           firstEnd,
           0,
           signal,
           inFlightMap,
-          0
+          0,
+          false
         );
+        const firstChunk = firstChunkRes.buffer;
         if (signal.aborted) return;
 
         if (firstChunk.byteLength === 0) {
@@ -2295,8 +2656,9 @@ export function startBackgroundTransfer(rec: TransferRecord): void {
             end: firstEnd,
             received: firstChunk.byteLength,
             workerIndex: 0,
+            adapterId: firstChunkRes.adapterId,
           });
-          recordBytesSent(rec, firstChunk.byteLength);
+          recordBytesSent(rec, firstChunk.byteLength, firstChunkRes.adapterId);
           updateChunkMapFromProgress(rec, inFlightMap);
 
           let nextChunkIdx = 1;
@@ -2310,14 +2672,15 @@ export function startBackgroundTransfer(rec: TransferRecord): void {
 
               const start = idx * chunkBytes;
               const end = Math.min(rec.totalBytes - 1, start + chunkBytes - 1);
-              const buf = await fetchExactByteRange(
+              const { buffer: buf, adapterId } = await fetchExactByteRange(
                 rec,
                 start,
                 end,
                 workerIndex,
                 signal,
                 inFlightMap,
-                idx
+                idx,
+                true
               );
               if (signal.aborted) break;
 
@@ -2330,8 +2693,8 @@ export function startBackgroundTransfer(rec: TransferRecord): void {
                 end,
                 received: buf.byteLength,
                 workerIndex,
+                adapterId,
               });
-              recordBytesSent(rec, buf.byteLength);
               updateChunkMapFromProgress(rec, inFlightMap);
 
               // Throttle cleanly if user enabled a global speed cap

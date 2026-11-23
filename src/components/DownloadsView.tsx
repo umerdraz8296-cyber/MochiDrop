@@ -1276,26 +1276,16 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
           {/* Animated Multi-Network Speed Bonding Diagram */}
           <div className="space-y-2">
             {showNetworkBond ? (
-              <div className="relative">
-                <NetworkBondingVisualizer
-                  adapters={adapters}
-                  totalBytesPerSec={liveAggregateBytesPerSec}
-                  activeStreams={activeStreamsSum}
-                  isDownloading={activeQueueCount > 0}
-                  onToggleAdapter={onToggleAdapter}
-                  onOpenNetworksView={onOpenNetworksView}
-                  compact
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowNetworkBond(false)}
-                  title="Collapse network bonding view"
-                  className="absolute right-24 top-2.5 h-6 px-2 rounded-md text-[11px] text-[#64786E] dark:text-[#8E9B95] hover:text-[#111B16] dark:hover:text-white inline-flex items-center gap-0.5 cursor-pointer"
-                >
-                  <ChevronUp className="h-3.5 w-3.5" />
-                  <span className="hidden sm:inline">Hide</span>
-                </button>
-              </div>
+              <NetworkBondingVisualizer
+                adapters={adapters}
+                totalBytesPerSec={liveAggregateBytesPerSec}
+                activeStreams={activeStreamsSum}
+                isDownloading={activeQueueCount > 0}
+                onToggleAdapter={onToggleAdapter}
+                onOpenNetworksView={onOpenNetworksView}
+                onHide={() => setShowNetworkBond(false)}
+                compact
+              />
             ) : (
               <button
                 type="button"
@@ -1305,7 +1295,11 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                 <span className="inline-flex items-center gap-2 font-medium">
                   <Network className="h-3.5 w-3.5 text-[#156E4B] dark:text-[#3BE098]" />
                   <span>
-                    {adapters.filter((a) => a.enabled).length} Networks Bonded →{' '}
+                    {adapters.filter((a) => a.connected && a.enabled).length}{' '}
+                    {adapters.filter((a) => a.connected && a.enabled).length === 1
+                      ? 'Network Active'
+                      : 'Networks Bonded'}{' '}
+                    →{' '}
                     <strong className="font-mono text-[#126646] dark:text-[#3BE098]">
                       {formatSpeedMBps(liveAggregateBytesPerSec)}
                     </strong>
@@ -1824,7 +1818,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
 
                                 <div className="flex items-center gap-2.5 text-[10px]">
                                   {adapters
-                                    .filter((a) => a.enabled)
+                                    .filter((a) => a.connected && a.enabled)
                                     .map((adapter) => (
                                       <span
                                         key={adapter.id}

@@ -5,56 +5,8 @@ import {
   PlexoSettings,
 } from '../types/plexo';
 
-export const INITIAL_ADAPTERS: NetworkAdapter[] = [
-  {
-    id: 'adapter-wifi',
-    deviceCode: 'en0',
-    name: 'Wi-Fi',
-    interfaceType: 'Wi-Fi',
-    enabled: true,
-    maxCapacityMbps: 240,
-    currentSpeedMbps: 0,
-    speedCapMbps: null,
-    dataBudgetGb: null,
-    budgetPeriod: 'monthly',
-    usedDataGb: 0,
-    metered: false,
-    shade: 'solid',
-    historyMbps: Array(16).fill(0),
-  },
-  {
-    id: 'adapter-ethernet',
-    deviceCode: 'en1',
-    name: 'Ethernet',
-    interfaceType: 'Ethernet',
-    enabled: true,
-    maxCapacityMbps: 360,
-    currentSpeedMbps: 0,
-    speedCapMbps: null,
-    dataBudgetGb: null,
-    budgetPeriod: 'monthly',
-    usedDataGb: 0,
-    metered: false,
-    shade: 'mid',
-    historyMbps: Array(16).fill(0),
-  },
-  {
-    id: 'adapter-usb5g',
-    deviceCode: 'usb0',
-    name: 'USB Cellular',
-    interfaceType: 'Cellular USB',
-    enabled: true,
-    maxCapacityMbps: 150,
-    currentSpeedMbps: 0,
-    speedCapMbps: 100,
-    dataBudgetGb: 5,
-    budgetPeriod: 'daily',
-    usedDataGb: 0,
-    metered: true,
-    shade: 'soft',
-    historyMbps: Array(16).fill(0),
-  },
-];
+// Real connected OS network interfaces are populated live from /api/networks
+export const INITIAL_ADAPTERS: NetworkAdapter[] = [];
 
 export const INITIAL_DOWNLOADS: DownloadItem[] = [];
 

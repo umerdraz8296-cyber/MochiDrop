@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, MotionConfig, motion } from 'motion/react';
 import {
+  ArrowUpCircle,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -38,12 +39,15 @@ import {
   PlexoPlugin,
   PlexoSettings,
   StreamCountOption,
+  UpdateCheckInfo,
+  UpdateDownloadStatus,
   WorkspaceTab,
 } from './types/plexo';
 import { formatSpeedMBps } from './utils/format';
 import { DownloadsView } from './components/DownloadsView';
 import { NetworksView } from './components/NetworksView';
 import { SettingsView } from './components/SettingsView';
+import { UpdateModal } from './components/UpdateModal';
 
 const BRAND_NAME = 'MochiDrop';
 
@@ -83,7 +87,59 @@ interface ServerTransferDto {
   errorMessage: string | null;
   httpStatus: number | null;
   createdAt?: number;
-  chunks: Array<{ index: number; progress: number; workerIndex: number }>;
+  chunks: Array<{ index: number; progress: number; workerIndex: number; adapterId?: string }>;
+}
+
+interface ServerNetworkDto {
+  id: string;
+  deviceCode: string;
+  name: string;
+  ipAddress: string;
+  ssid?: string;
+  interfaceType: NetworkAdapter['interfaceType'];
+  connected: boolean;
+  enabled: boolean;
+  maxCapacityMbps: number;
+  linkSpeedKnown: boolean;
+  currentSpeedBytesPerSec: number;
+  currentSpeedMbps: number;
+  usedDataGb: number;
+  metered: boolean;
+  shade: NetworkAdapter['shade'];
+  historyMbps: number[];
+}
+
+function mergeServerNetworks(
+  prev: NetworkAdapter[],
+  incoming: ServerNetworkDto[]
+): NetworkAdapter[] {
+  const prevById = new Map(prev.map((a) => [a.id, a]));
+  return incoming.map((net) => {
+    const existing = prevById.get(net.id);
+    const keepCustomName = Boolean(existing?.customNamed && existing.name.trim() && net.connected);
+    return {
+      id: net.id,
+      deviceCode: net.deviceCode,
+      name: keepCustomName ? existing!.name : net.name,
+      ipAddress: net.ipAddress,
+      ssid: net.ssid,
+      customNamed: keepCustomName,
+      interfaceType: net.interfaceType,
+      connected: net.connected,
+      enabled: net.connected && net.enabled,
+      maxCapacityMbps: net.maxCapacityMbps,
+      linkSpeedKnown: net.linkSpeedKnown,
+      currentSpeedBytesPerSec: net.connected ? net.currentSpeedBytesPerSec : 0,
+      currentSpeedMbps: net.connected ? net.currentSpeedMbps : 0,
+      speedCapMbps: existing?.speedCapMbps ?? null,
+      dataBudgetGb: existing?.dataBudgetGb ?? null,
+      budgetPeriod: existing?.budgetPeriod ?? 'monthly',
+      usedDataGb: net.usedDataGb,
+      metered: net.metered,
+      shade: net.shade,
+      historyMbps: net.historyMbps?.length ? net.historyMbps : Array(16).fill(0),
+    };
+  });
 }
 
 function normalizeQualityToken(q: string): string {
@@ -342,6 +398,25 @@ export default function App() {
   const [urlInput, setUrlInput] = useState('');
 
   const [toast, setToast] = useState<string | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<UpdateCheckInfo | null>(null);
+  const [updateDownload, setUpdateDownload] = useState<UpdateDownloadStatus>({
+    state: 'idle',
+    version: null,
+    filename: null,
+    downloadedBytes: 0,
+    totalBytes: 0,
+    percent: 0,
+    error: null,
+  });
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateModalOpen, setUpdateModalOpen] = useState(false);
+  const [dismissedUpdateTag, setDismissedUpdateTag] = useState<string>(() => {
+    try {
+      return localStorage.getItem('mochidrop_dismissed_update_tag') || '';
+    } catch {
+      return '';
+    }
+  });
   const toastTimerRef = useRef<number | null>(null);
   const lastHandoffSyncRef = useRef<number>(Date.now());
   const seenHandoffIdsRef = useRef<Set<string>>(new Set());
@@ -350,7 +425,7 @@ export default function App() {
   const startingQueueIdsRef = useRef<Set<string>>(new Set());
   const adaptersRef = useRef<NetworkAdapter[]>(INITIAL_ADAPTERS);
   const enabledAdapterIdsRef = useRef<string[]>(
-    INITIAL_ADAPTERS.filter((a) => a.enabled).map((a) => a.id)
+    INITIAL_ADAPTERS.filter((a) => a.connected && a.enabled).map((a) => a.id)
   );
 
   const notify = useCallback((message: string) => {
@@ -377,18 +452,274 @@ export default function App() {
     }
   }, [theme]);
 
-  const handleToggleAdapter = useCallback((id: string) => {
+  const handleCheckUpdates = useCallback(
+    async (manual = false) => {
+      setCheckingUpdate(true);
+      try {
+        const res = await fetch(`/api/updates/check${manual ? '?force=1' : ''}`);
+        if (!res.ok) {
+          if (manual) notify('Could not check GitHub for updates right now');
+          return;
+        }
+        const data = (await res.json()) as {
+          update?: UpdateCheckInfo;
+          download?: UpdateDownloadStatus;
+        };
+        if (data.update) {
+          setUpdateInfo(data.update);
+          if (manual) {
+            if (data.update.updateAvailable) {
+              setUpdateModalOpen(true);
+            } else if (data.update.error) {
+              notify(data.update.error);
+            } else {
+              notify(`MochiDrop v${data.update.currentVersion} is up to date`);
+            }
+          }
+        }
+        if (data.download) {
+          setUpdateDownload(data.download);
+        }
+      } catch {
+        if (manual) notify('Could not reach GitHub Releases');
+      } finally {
+        setCheckingUpdate(false);
+      }
+    },
+    [notify]
+  );
+
+  const handleStartUpdateDownload = useCallback(
+    async (assetName?: string) => {
+      try {
+        const res = await fetch('/api/updates/download', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ assetName }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          notify(data?.error || 'Could not start update download');
+          return;
+        }
+        if (data.download) {
+          setUpdateDownload(data.download as UpdateDownloadStatus);
+        }
+      } catch {
+        notify('Could not start update download');
+      }
+    },
+    [notify]
+  );
+
+  const handleInstallUpdateNow = useCallback(async () => {
+    try {
+      const res = await fetch('/api/updates/install', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        notify(data?.error || 'Could not launch update installer');
+        return;
+      }
+      setUpdateDownload((prev) => ({ ...prev, state: 'installing' }));
+      notify(data?.message || 'Launching MochiDrop update installer...');
+    } catch {
+      notify('Could not launch update installer');
+    }
+  }, [notify]);
+
+  const handleDismissUpdateBanner = useCallback(() => {
+    if (!updateInfo?.releaseTag) return;
+    setDismissedUpdateTag(updateInfo.releaseTag);
+    try {
+      localStorage.setItem('mochidrop_dismissed_update_tag', updateInfo.releaseTag);
+    } catch {
+      // ignore
+    }
+    setUpdateModalOpen(false);
+  }, [updateInfo?.releaseTag]);
+
+  // Automatic GitHub Releases update check on startup + every 6 hours
+  useEffect(() => {
+    const startupTimer = window.setTimeout(() => {
+      void handleCheckUpdates(false);
+    }, 2200);
+    const periodicTimer = window.setInterval(() => {
+      void handleCheckUpdates(false);
+    }, 6 * 60 * 60 * 1000);
+    return () => {
+      window.clearTimeout(startupTimer);
+      window.clearInterval(periodicTimer);
+    };
+  }, [handleCheckUpdates]);
+
+  // Poll update download progress while downloading installer
+  useEffect(() => {
+    if (updateDownload.state !== 'downloading') return;
+    let active = true;
+    const interval = window.setInterval(async () => {
+      try {
+        const res = await fetch('/api/updates/status');
+        if (!res.ok || !active) return;
+        const data = (await res.json()) as { download?: UpdateDownloadStatus };
+        if (data.download && active) {
+          setUpdateDownload(data.download);
+          if (data.download.state === 'ready') {
+            notify('Update downloaded — click Install & Restart to finish');
+          }
+        }
+      } catch {
+        // retry next tick
+      }
+    }, 500);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [updateDownload.state, notify]);
+
+  const handleToggleAdapter = useCallback(async (id: string) => {
     setAdapters((prev) =>
-      prev.map((a) => (a.id === id ? { ...a, enabled: !a.enabled } : a))
+      prev.map((a) =>
+        a.id === id && a.connected
+          ? {
+              ...a,
+              enabled: !a.enabled,
+              currentSpeedBytesPerSec: !a.enabled ? a.currentSpeedBytesPerSec : 0,
+              currentSpeedMbps: !a.enabled ? a.currentSpeedMbps : 0,
+            }
+          : a
+      )
     );
+    try {
+      const res = await fetch(`/api/networks/${encodeURIComponent(id)}/toggle`, {
+        method: 'POST',
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.networks)) {
+          setAdapters((prev) => mergeServerNetworks(prev, data.networks as ServerNetworkDto[]));
+        }
+      }
+    } catch {
+      // keep optimistic state until next sync
+    }
   }, []);
 
-  const enabledAdapters = useMemo(() => adapters.filter((a) => a.enabled), [adapters]);
+  const readBrowserNetworkHint = useCallback(() => {
+    const nav = navigator as Navigator & {
+      connection?: {
+        type?: string;
+        downlink?: number;
+        addEventListener?: (event: string, cb: () => void) => void;
+        removeEventListener?: (event: string, cb: () => void) => void;
+      };
+    };
+    const conn = nav.connection;
+    const rawType = (conn?.type || '').toLowerCase();
+    let clientType: 'wifi' | 'ethernet' | 'usb' = 'wifi';
+    if (rawType === 'ethernet') {
+      clientType = 'ethernet';
+    } else if (rawType === 'cellular') {
+      clientType = 'usb';
+    }
+    const online = typeof navigator.onLine === 'boolean' ? navigator.onLine : true;
+    const downlink =
+      typeof conn?.downlink === 'number' && Number.isFinite(conn.downlink) && conn.downlink > 0
+        ? Math.round(conn.downlink)
+        : 0;
+    return { clientType, online, downlink };
+  }, []);
+
+  const handleRescanNetworks = useCallback(async () => {
+    try {
+      const hint = readBrowserNetworkHint();
+      const res = await fetch('/api/networks/rescan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(hint),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.networks)) {
+          const list = data.networks as ServerNetworkDto[];
+          const connectedList = list.filter((n) => n.connected);
+          setAdapters((prev) => mergeServerNetworks(prev, list));
+          notify(
+            connectedList.length === 0
+              ? 'No active network detected'
+              : `Connected: ${connectedList.map((n) => n.name).join(', ')}`
+          );
+        }
+      }
+    } catch {
+      notify('Could not rescan network interfaces');
+    }
+  }, [notify, readBrowserNetworkHint]);
+
+  // Live OS Network Interface Sync: automatically reflects connected Wi-Fi / Ethernet / USB interfaces
+  useEffect(() => {
+    let active = true;
+    const syncNetworks = async () => {
+      try {
+        const hint = readBrowserNetworkHint();
+        const qs = new URLSearchParams({
+          clientType: hint.clientType,
+          online: hint.online ? '1' : '0',
+          downlink: String(hint.downlink),
+        });
+        const res = await fetch(`/api/networks?${qs.toString()}`);
+        if (!res.ok || !active) return;
+        const data = await res.json();
+        if (Array.isArray(data.networks) && active) {
+          setAdapters((prev) => mergeServerNetworks(prev, data.networks as ServerNetworkDto[]));
+        }
+      } catch {
+        // retry on next tick
+      }
+    };
+    void syncNetworks();
+    const timer = window.setInterval(() => {
+      void syncNetworks();
+    }, 2500);
+
+    const handleConnectionChange = () => {
+      void syncNetworks();
+    };
+    window.addEventListener('online', handleConnectionChange);
+    window.addEventListener('offline', handleConnectionChange);
+    const navConn = (
+      navigator as Navigator & {
+        connection?: {
+          addEventListener?: (event: string, cb: () => void) => void;
+          removeEventListener?: (event: string, cb: () => void) => void;
+        };
+      }
+    ).connection;
+    navConn?.addEventListener?.('change', handleConnectionChange);
+
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener('online', handleConnectionChange);
+      window.removeEventListener('offline', handleConnectionChange);
+      navConn?.removeEventListener?.('change', handleConnectionChange);
+    };
+  }, [readBrowserNetworkHint]);
+
+  const enabledAdapters = useMemo(
+    () => adapters.filter((a) => a.connected && a.enabled),
+    [adapters]
+  );
 
   useEffect(() => {
     adaptersRef.current = adapters;
-    const ids = adapters.filter((a) => a.enabled).map((a) => a.id);
-    enabledAdapterIdsRef.current = ids.length ? ids : ['adapter-wifi'];
+    const ids = adapters.filter((a) => a.connected && a.enabled).map((a) => a.id);
+    const connectedIds = adapters.filter((a) => a.connected).map((a) => a.id);
+    enabledAdapterIdsRef.current = ids.length
+      ? ids
+      : connectedIds.length
+      ? [connectedIds[0]]
+      : ['slot-wifi'];
   }, [adapters]);
 
   const startRealHttpTransfer = useCallback(
@@ -511,7 +842,7 @@ export default function App() {
         const mappedChunks = serverTr.chunks.map((c) => ({
           index: c.index,
           progress: c.progress,
-          adapterId: enabledIds[c.workerIndex % enabledIds.length] || enabledIds[0],
+          adapterId: c.adapterId || enabledIds[c.workerIndex % enabledIds.length] || enabledIds[0],
         }));
 
         const item: DownloadItem = {
@@ -828,7 +1159,7 @@ export default function App() {
             chunks: tr.chunks.map((c) => ({
               index: c.index,
               progress: c.progress,
-              adapterId: enabledIds[c.workerIndex % enabledIds.length] || enabledIds[0],
+              adapterId: c.adapterId || enabledIds[c.workerIndex % enabledIds.length] || enabledIds[0],
             })),
             adapterSplit: Object.fromEntries(currentAdapters.map((a) => [a.id, 0])),
             resumable: tr.acceptRanges,
@@ -929,9 +1260,15 @@ export default function App() {
     if (!hasTrackableTransfer) {
       // Zero out live adapter speeds honestly when nothing is actively transferring
       setAdapters((prev) => {
-        const anyNonZero = prev.some((a) => a.currentSpeedMbps > 0);
+        const anyNonZero = prev.some(
+          (a) => a.currentSpeedMbps > 0 || (a.currentSpeedBytesPerSec ?? 0) > 0
+        );
         if (!anyNonZero) return prev;
-        return prev.map((a) => ({ ...a, currentSpeedMbps: 0 }));
+        return prev.map((a) => ({
+          ...a,
+          currentSpeedBytesPerSec: 0,
+          currentSpeedMbps: 0,
+        }));
       });
       return;
     }
@@ -957,8 +1294,6 @@ export default function App() {
         const serverList = data.transfers as ServerTransferDto[];
         const mapById = new Map<string, ServerTransferDto>();
         const deltasById = new Map<string, number>();
-        let totalRealBytesPerSec = 0;
-        let totalRealDeltaBytes = 0;
         const notifications: string[] = [];
 
         for (const tr of serverList) {
@@ -968,11 +1303,6 @@ export default function App() {
           const deltaBytes = Math.max(0, tr.downloadedBytes - prevBytes);
           prevTotalBytesRef.current[tr.id] = tr.downloadedBytes;
           deltasById.set(tr.id, deltaBytes);
-          totalRealDeltaBytes += deltaBytes;
-
-          if (tr.status === 'downloading') {
-            totalRealBytesPerSec += tr.speedBytesPerSec;
-          }
 
           const isTrulyCompleted =
             tr.status === 'completed' &&
@@ -1008,7 +1338,7 @@ export default function App() {
 
             const nextSplit =
               deltaBytes > 0 ? { ...item.adapterSplit } : item.adapterSplit;
-            if (deltaBytes > 0) {
+            if (deltaBytes > 0 && activeIds.length > 0) {
               const perId = deltaBytes / activeIds.length;
               for (const id of activeIds) {
                 nextSplit[id] = (nextSplit[id] || 0) + perId;
@@ -1018,7 +1348,7 @@ export default function App() {
             const mappedChunks = live.chunks.map((c) => ({
               index: c.index,
               progress: c.progress,
-              adapterId: activeIds[c.workerIndex % activeIds.length] || activeIds[0],
+              adapterId: c.adapterId || activeIds[c.workerIndex % activeIds.length] || activeIds[0],
             }));
 
             return {
@@ -1052,38 +1382,10 @@ export default function App() {
           notify(msg);
         }
 
-        // Reflect REAL measured internet throughput across active network links
-        const totalRealMbps = (totalRealBytesPerSec * 8) / (1024 * 1024);
-        const deltaGb = totalRealDeltaBytes / (1024 * 1024 * 1024);
-
-        setAdapters((prev) => {
-          const active = prev.filter((a) => a.enabled);
-          const count = Math.max(1, active.length);
-          const perAdapterMbps = active.length > 0 ? totalRealMbps / count : 0;
-          const perAdapterGb = active.length > 0 ? deltaGb / count : 0;
-
-          const allIdleAndUnchanged =
-            perAdapterMbps === 0 &&
-            perAdapterGb === 0 &&
-            prev.every((a) => a.currentSpeedMbps === 0);
-          if (allIdleAndUnchanged) return prev;
-
-          return prev.map((a) => {
-            if (!a.enabled) {
-              return {
-                ...a,
-                currentSpeedMbps: 0,
-                historyMbps: [...a.historyMbps.slice(1), 0],
-              };
-            }
-            return {
-              ...a,
-              currentSpeedMbps: perAdapterMbps,
-              usedDataGb: a.usedDataGb + perAdapterGb,
-              historyMbps: [...a.historyMbps.slice(1), Number(perAdapterMbps.toFixed(1))],
-            };
-          });
-        });
+        // Apply REAL per-adapter OS throughput snapshot returned atomically from server
+        if (Array.isArray(data.networks)) {
+          setAdapters((prev) => mergeServerNetworks(prev, data.networks as ServerNetworkDto[]));
+        }
       } catch {
         // retry next tick
       } finally {
@@ -1329,8 +1631,26 @@ export default function App() {
             </button>
           </div>
 
-          {/* Right: Single Light / Dark Toggle */}
-          <div className="flex items-center shrink-0">
+          {/* Right: Update Indicator (when new GitHub release available) + Light / Dark Toggle */}
+          <div className="flex items-center gap-2 shrink-0">
+            {updateInfo?.updateAvailable && (
+              <motion.button
+                whileTap={{ scale: 0.96 }}
+                type="button"
+                onClick={() => setUpdateModalOpen(true)}
+                className="h-8 px-3 rounded-lg border border-[#2FD48B]/40 bg-[#E2F5EC]/90 dark:bg-[#0F2B20]/90 text-xs font-semibold text-[#126646] dark:text-[#3BE098] hover:border-[#2FD48B]/70 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer shadow-[0_0_16px_rgba(47,212,139,0.16)]"
+              >
+                <ArrowUpCircle className="h-3.5 w-3.5" />
+                <span>
+                  {updateDownload.state === 'ready'
+                    ? 'Install Update'
+                    : updateDownload.state === 'downloading'
+                    ? `Updating ${updateDownload.percent}%`
+                    : `Update ${updateInfo.releaseTag}`}
+                </span>
+              </motion.button>
+            )}
+
             <motion.button
               whileTap={{ scale: 0.96 }}
               type="button"
@@ -1352,6 +1672,49 @@ export default function App() {
             </motion.button>
           </div>
         </header>
+
+        {/* Non-Intrusive New Release Notification Strip (appears automatically when a newer GitHub Release exists) */}
+        <AnimatePresence>
+          {updateInfo?.updateAvailable &&
+            dismissedUpdateTag !== updateInfo.releaseTag && (
+              <motion.div
+                key="mochidrop-update-banner"
+                initial={{ opacity: 0, y: -8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.2 }}
+                className="px-4 sm:px-6 py-2 border-b border-[#1C6B4D]/20 dark:border-[#2FD48B]/25 bg-[#E6F7EF]/90 dark:bg-[#0B2219]/85 backdrop-blur-md flex flex-wrap items-center justify-between gap-2 text-xs"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <ArrowUpCircle className="h-4 w-4 text-[#156E4B] dark:text-[#3BE098] shrink-0" />
+                  <span className="text-[#111B16] dark:text-white font-medium truncate">
+                    New release <strong className="font-mono">{updateInfo.releaseTag}</strong> is available
+                    <span className="hidden sm:inline text-[#52655C] dark:text-[#8E9B95] font-normal">
+                      {' '}
+                      (you have v{updateInfo.currentVersion})
+                    </span>
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setUpdateModalOpen(true)}
+                    className="h-7 px-3 rounded-lg bg-[#1C6B4D] hover:bg-[#16593F] dark:bg-[#1A5E44] dark:hover:bg-[#217455] border border-[#2FD48B]/40 text-white text-[11px] font-semibold cursor-pointer transition-colors"
+                  >
+                    {updateDownload.state === 'ready' ? 'Install & Restart' : 'Download & Update'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDismissUpdateBanner}
+                    aria-label="Dismiss update notification"
+                    className="p-1 rounded-md text-[#52655C] dark:text-[#8E9B95] hover:text-[#111B16] dark:hover:text-white cursor-pointer"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </motion.div>
+            )}
+        </AnimatePresence>
 
         {/* Workspace Body: Left Single-Side Sidebar + Main Canvas */}
         <div className="flex-1 flex min-h-0 relative">
@@ -1673,33 +2036,13 @@ export default function App() {
                       settings={settings}
                       totalBytesPerSec={liveAggregateBytesPerSec}
                       isDownloading={activeDownloadCount > 0}
-                      onToggleAdapter={handleToggleAdapter}
+                      onToggleAdapter={(id) => void handleToggleAdapter(id)}
                       onUpdateAdapter={(id, patch) => {
                         setAdapters((prev) =>
                           prev.map((a) => (a.id === id ? { ...a, ...patch } : a))
                         );
                       }}
-                      onAddAdapter={(name, interfaceType, maxCapacityMbps) => {
-                        const idx = adapters.length;
-                        const newAdapter: NetworkAdapter = {
-                          id: `adapter-${Date.now()}`,
-                          deviceCode: interfaceType === 'Cellular USB' ? `usb${idx}` : `en${idx}`,
-                          name,
-                          interfaceType,
-                          enabled: true,
-                          maxCapacityMbps,
-                          currentSpeedMbps: 0,
-                          speedCapMbps: null,
-                          dataBudgetGb: null,
-                          budgetPeriod: 'monthly',
-                          usedDataGb: 0,
-                          metered: interfaceType === 'Cellular USB',
-                          shade: 'stripe',
-                          historyMbps: Array(16).fill(0),
-                        };
-                        setAdapters((prev) => [...prev, newAdapter]);
-                        notify(`Added ${name}`);
-                      }}
+                      onRescanNetworks={handleRescanNetworks}
                       onUpdateSettings={(patch) => setSettings((prev) => ({ ...prev, ...patch }))}
                     />
                   )}
@@ -1708,6 +2051,11 @@ export default function App() {
                     <SettingsView
                       plugins={plugins}
                       settings={settings}
+                      updateInfo={updateInfo}
+                      updateDownload={updateDownload}
+                      checkingUpdate={checkingUpdate}
+                      onCheckUpdates={() => void handleCheckUpdates(true)}
+                      onOpenUpdateModal={() => setUpdateModalOpen(true)}
                       onTogglePlugin={(id) => {
                         setPlugins((prev) =>
                           prev.map((p) => (p.id === id ? { ...p, enabled: !p.enabled } : p))
@@ -1732,7 +2080,14 @@ export default function App() {
                 onClick={() => setActiveTab('networks')}
                 className="hover:text-[#156E4B] dark:hover:text-[#3BE098] transition-colors whitespace-nowrap cursor-pointer"
               >
-                {enabledAdapters.length}/{adapters.length} Networks Bonded · {settings.preferredStreams} streams
+                {enabledAdapters.length === 0
+                  ? 'No Active Network'
+                  : enabledAdapters.length === 1
+                  ? `${enabledAdapters[0].name} Active`
+                  : `${enabledAdapters.length} Networks Bonded (${enabledAdapters
+                      .map((a) => (a.interfaceType === 'Cellular USB' ? 'USB' : a.interfaceType))
+                      .join(' + ')})`}{' '}
+                · {settings.preferredStreams} streams
               </button>
             </div>
 
@@ -1752,6 +2107,18 @@ export default function App() {
             </div>
           </footer>
         )}
+
+        <UpdateModal
+          open={updateModalOpen}
+          updateInfo={updateInfo}
+          downloadStatus={updateDownload}
+          checking={checkingUpdate}
+          onClose={() => setUpdateModalOpen(false)}
+          onRemindLater={handleDismissUpdateBanner}
+          onCheckAgain={() => void handleCheckUpdates(true)}
+          onStartDownload={(assetName) => void handleStartUpdateDownload(assetName)}
+          onInstallNow={() => void handleInstallUpdateNow()}
+        />
 
         <AnimatePresence>
           {toast && (

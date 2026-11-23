@@ -1,6 +1,26 @@
 import React, { useState } from 'react';
-import { Clock, Folder, HardDrive, Layers, Plug, Plus, Trash2, Zap } from 'lucide-react';
-import { ConcurrentLimit, PlexoPlugin, PlexoSettings, StreamCountOption } from '../types/plexo';
+import {
+  ArrowUpCircle,
+  CheckCircle2,
+  Clock,
+  ExternalLink,
+  Folder,
+  HardDrive,
+  Layers,
+  Plug,
+  Plus,
+  RefreshCw,
+  Trash2,
+  Zap,
+} from 'lucide-react';
+import {
+  ConcurrentLimit,
+  PlexoPlugin,
+  PlexoSettings,
+  StreamCountOption,
+  UpdateCheckInfo,
+  UpdateDownloadStatus,
+} from '../types/plexo';
 
 const CONCURRENT_CHOICES: ConcurrentLimit[] = [1, 2, 3, 4, 5];
 const STREAM_CHOICES: StreamCountOption[] = [4, 8, 16, 32];
@@ -8,6 +28,11 @@ const STREAM_CHOICES: StreamCountOption[] = [4, 8, 16, 32];
 interface SettingsViewProps {
   plugins: PlexoPlugin[];
   settings: PlexoSettings;
+  updateInfo: UpdateCheckInfo | null;
+  updateDownload: UpdateDownloadStatus;
+  checkingUpdate: boolean;
+  onCheckUpdates: () => void;
+  onOpenUpdateModal: () => void;
   onTogglePlugin: (id: string) => void;
   onUpdateSettings: (patch: Partial<PlexoSettings>) => void;
   onNotify: (msg: string) => void;
@@ -16,6 +41,11 @@ interface SettingsViewProps {
 export const SettingsView: React.FC<SettingsViewProps> = ({
   plugins,
   settings,
+  updateInfo,
+  updateDownload,
+  checkingUpdate,
+  onCheckUpdates,
+  onOpenUpdateModal,
   onTogglePlugin,
   onUpdateSettings,
   onNotify,
@@ -37,6 +67,82 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Software Updates (GitHub Releases) */}
+      <section className="border border-[#0F241B]/10 dark:border-white/[0.09] bg-white/65 dark:bg-white/[0.03] backdrop-blur-md rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex items-start gap-3 min-w-0">
+          <div className="h-10 w-10 rounded-xl bg-[#E2F5EC] dark:bg-[#0F2B20]/90 border border-[#1C6B4D]/20 dark:border-[#2FD48B]/30 text-[#156E4B] dark:text-[#3BE098] flex items-center justify-center shrink-0">
+            {updateInfo?.updateAvailable ? (
+              <ArrowUpCircle className="h-5 w-5" />
+            ) : (
+              <CheckCircle2 className="h-5 w-5" />
+            )}
+          </div>
+          <div className="min-w-0 space-y-0.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="font-display text-sm font-semibold text-[#111B16] dark:text-white">
+                App Updates (GitHub Releases)
+              </h3>
+              <span className="font-mono text-[11px] text-[#52655C] dark:text-[#8E9B95]">
+                v{updateInfo?.currentVersion || '1.0.0'}
+              </span>
+            </div>
+            <p className="text-xs text-[#52655C] dark:text-[#8E9B95]">
+              {updateInfo?.updateAvailable ? (
+                <span className="text-[#126646] dark:text-[#3BE098] font-medium">
+                  New release {updateInfo.releaseTag} is available
+                  {updateDownload.state === 'downloading'
+                    ? ` · Downloading (${updateDownload.percent}%)`
+                    : updateDownload.state === 'ready'
+                    ? ' · Ready to install'
+                    : ''}
+                </span>
+              ) : updateInfo?.error ? (
+                <span>{updateInfo.error}</span>
+              ) : (
+                <span>
+                  Automatically checks GitHub ({updateInfo?.repo || 'umerdraz8296-cyber/MochiDrop'}) for new releases.
+                </span>
+              )}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {updateInfo?.releaseUrl && (
+            <a
+              href={updateInfo.releaseUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="h-9 px-3 rounded-xl border border-[#0F241B]/12 dark:border-white/[0.1] bg-white/75 dark:bg-white/[0.04] text-xs font-medium text-[#22352C] dark:text-[#DCE6E1] hover:border-[#1B6B4D]/40 dark:hover:border-[#2FD48B]/35 inline-flex items-center gap-1.5 transition-colors"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              Releases
+            </a>
+          )}
+
+          <button
+            type="button"
+            disabled={checkingUpdate}
+            onClick={onCheckUpdates}
+            className="h-9 px-3.5 rounded-xl border border-[#0F241B]/12 dark:border-white/[0.1] bg-white/75 dark:bg-white/[0.04] text-xs font-medium text-[#22352C] dark:text-[#DCE6E1] hover:border-[#1B6B4D]/40 dark:hover:border-[#2FD48B]/35 inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-55 transition-colors"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${checkingUpdate ? 'animate-spin' : ''}`} />
+            {checkingUpdate ? 'Checking...' : 'Check for Updates'}
+          </button>
+
+          {updateInfo?.updateAvailable && (
+            <button
+              type="button"
+              onClick={onOpenUpdateModal}
+              className="h-9 px-4 rounded-xl bg-[#1C6B4D] hover:bg-[#16593F] dark:bg-[#1A5E44]/95 dark:hover:bg-[#217455] border border-[#2FD48B]/40 text-white text-xs font-semibold shadow-[0_0_18px_rgba(34,197,126,0.2)] inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+            >
+              <ArrowUpCircle className="h-3.5 w-3.5" />
+              {updateDownload.state === 'ready' ? 'Install Update' : 'Update Now'}
+            </button>
+          )}
+        </div>
+      </section>
+
       {/* Plugins */}
       <section className="border border-[#0F241B]/10 dark:border-white/[0.09] bg-white/65 dark:bg-white/[0.03] backdrop-blur-md rounded-2xl overflow-hidden">
         <div className="px-5 py-3.5 border-b border-[#0F241B]/10 dark:border-white/[0.08] bg-white/50 dark:bg-white/[0.025] flex items-center justify-between">

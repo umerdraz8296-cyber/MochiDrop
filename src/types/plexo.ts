@@ -101,9 +101,15 @@ export interface NetworkAdapter {
   id: string;
   deviceCode: string;
   name: string;
+  ipAddress?: string;
+  ssid?: string;
+  customNamed?: boolean;
   interfaceType: 'Wi-Fi' | 'Ethernet' | 'Cellular USB' | 'Virtual';
+  connected: boolean;
   enabled: boolean;
   maxCapacityMbps: number;
+  linkSpeedKnown?: boolean;
+  currentSpeedBytesPerSec?: number;
   currentSpeedMbps: number;
   speedCapMbps: number | null;
   dataBudgetGb: number | null;
@@ -112,6 +118,41 @@ export interface NetworkAdapter {
   metered: boolean;
   shade: 'solid' | 'mid' | 'soft' | 'stripe';
   historyMbps: number[];
+}
+
+export interface ReleaseAssetInfo {
+  name: string;
+  downloadUrl: string;
+  sizeBytes: number;
+}
+
+export interface UpdateCheckInfo {
+  currentVersion: string;
+  latestVersion: string;
+  updateAvailable: boolean;
+  repo: string;
+  releaseName: string;
+  releaseTag: string;
+  releaseNotes: string;
+  publishedAt: string | null;
+  releaseUrl: string;
+  isDesktopApp: boolean;
+  platform: string;
+  arch: string;
+  recommendedAsset: ReleaseAssetInfo | null;
+  allAssets: ReleaseAssetInfo[];
+  checkedAt: number;
+  error: string | null;
+}
+
+export interface UpdateDownloadStatus {
+  state: 'idle' | 'downloading' | 'ready' | 'installing' | 'error';
+  version: string | null;
+  filename: string | null;
+  downloadedBytes: number;
+  totalBytes: number;
+  percent: number;
+  error: string | null;
 }
 
 export interface PlexoPlugin {

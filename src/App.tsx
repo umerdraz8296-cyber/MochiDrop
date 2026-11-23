@@ -18,6 +18,7 @@ import {
   Music,
   Network,
   Package,
+  RefreshCw,
   Settings,
   Sun,
   X,
@@ -538,17 +539,43 @@ export default function App() {
     setUpdateModalOpen(false);
   }, [updateInfo?.releaseTag]);
 
-  // Automatic GitHub Releases update check on startup + every 6 hours
+  // Automatic GitHub Releases update check on startup, every 5 min, and when returning to app / reconnecting
   useEffect(() => {
+    let lastAutoCheckAt = 0;
+    const triggerBackgroundCheck = (forceStartup = false) => {
+      const now = Date.now();
+      if (!forceStartup && now - lastAutoCheckAt < 60_000) return;
+      lastAutoCheckAt = now;
+      void handleCheckUpdates(false);
+    };
+
     const startupTimer = window.setTimeout(() => {
-      void handleCheckUpdates(false);
-    }, 2200);
+      triggerBackgroundCheck(true);
+    }, 1200);
+
     const periodicTimer = window.setInterval(() => {
-      void handleCheckUpdates(false);
-    }, 6 * 60 * 60 * 1000);
+      triggerBackgroundCheck(false);
+    }, 5 * 60 * 1000);
+
+    const handleWindowFocus = () => {
+      if (document.visibilityState === 'visible') {
+        triggerBackgroundCheck(false);
+      }
+    };
+    const handleOnline = () => {
+      triggerBackgroundCheck(false);
+    };
+
+    window.addEventListener('focus', handleWindowFocus);
+    document.addEventListener('visibilitychange', handleWindowFocus);
+    window.addEventListener('online', handleOnline);
+
     return () => {
       window.clearTimeout(startupTimer);
       window.clearInterval(periodicTimer);
+      window.removeEventListener('focus', handleWindowFocus);
+      document.removeEventListener('visibilitychange', handleWindowFocus);
+      window.removeEventListener('online', handleOnline);
     };
   }, [handleCheckUpdates]);
 
@@ -1631,9 +1658,9 @@ export default function App() {
             </button>
           </div>
 
-          {/* Right: Update Indicator (when new GitHub release available) + Light / Dark Toggle */}
+          {/* Right: Always-Accessible Update Check / New Release Indicator + Light / Dark Toggle */}
           <div className="flex items-center gap-2 shrink-0">
-            {updateInfo?.updateAvailable && (
+            {updateInfo?.updateAvailable ? (
               <motion.button
                 whileTap={{ scale: 0.96 }}
                 type="button"
@@ -1647,6 +1674,24 @@ export default function App() {
                     : updateDownload.state === 'downloading'
                     ? `Updating ${updateDownload.percent}%`
                     : `Update ${updateInfo.releaseTag}`}
+                </span>
+              </motion.button>
+            ) : (
+              <motion.button
+                whileTap={{ scale: 0.96 }}
+                type="button"
+                disabled={checkingUpdate}
+                onClick={() => void handleCheckUpdates(true)}
+                title={
+                  updateInfo
+                    ? `MochiDrop v${updateInfo.currentVersion} — click to check GitHub for updates`
+                    : 'Check GitHub Releases for updates'
+                }
+                className="h-8 px-2.5 rounded-lg border border-[#0F241B]/12 dark:border-white/[0.1] bg-white/65 dark:bg-white/[0.04] text-xs font-medium text-[#203329] dark:text-[#D5DFDA] hover:border-[#1B6B4D]/40 dark:hover:border-[#2FD48B]/35 hover:bg-white/90 dark:hover:bg-white/[0.08] transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 text-[#156E4B] dark:text-[#3BE098] ${checkingUpdate ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">
+                  {checkingUpdate ? 'Checking...' : 'Updates'}
                 </span>
               </motion.button>
             )}

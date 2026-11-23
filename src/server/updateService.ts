@@ -51,7 +51,7 @@ const ALLOWED_GITHUB_DOWNLOAD_HOSTS = new Set([
   'github-releases.githubusercontent.com',
 ]);
 
-const CHECK_CACHE_MS = 10 * 60 * 1000; // 10 minutes
+const CHECK_CACHE_MS = 60 * 1000; // 60 seconds for background checks (ETag 304 costs 0 GitHub quota)
 const UPDATES_BASE_DIR = path.resolve(
   process.env.MOCHIDROP_DATA_DIR
     ? path.join(process.env.MOCHIDROP_DATA_DIR, '.updates')
@@ -59,6 +59,7 @@ const UPDATES_BASE_DIR = path.resolve(
 );
 
 let cachedCheck: UpdateCheckResultDto | null = null;
+let cachedEtag: string | null = null;
 let checkInFlight: Promise<UpdateCheckResultDto> | null = null;
 
 let downloadState: UpdateDownloadStatusDto = {
@@ -74,10 +75,12 @@ let readyUpdateFilePath: string | null = null;
 let activeDownloadAbort: AbortController | null = null;
 
 function readPackageJsonMeta(): { version: string; repo: string } {
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
   const candidates = [
     path.resolve(process.cwd(), 'package.json'),
     path.resolve(__dirname, '../../package.json'),
     path.resolve(__dirname, '../package.json'),
+    ...(resourcesPath ? [path.resolve(resourcesPath, 'app', 'package.json')] : []),
   ];
   for (const p of candidates) {
     try {
@@ -204,6 +207,84 @@ function pickRecommendedAsset(
   );
 }
 
+/**
+ * Rate-limit-free fallback: GitHub's /releases/latest web URL redirects via 302 to /releases/tag/vX.Y.Z
+ * without consuming GitHub REST API quota.
+ */
+async function checkGithubLatestViaRedirect(
+  cfg: ReturnType<typeof getAppUpdateConfig>
+): Promise<UpdateCheckResultDto | null> {
+  try {
+    const res = await fetch(`https://github.com/${cfg.repo}/releases/latest`, {
+      redirect: 'manual',
+      headers: {
+        'User-Agent': `MochiDrop/${cfg.currentVersion}`,
+      },
+      signal: AbortSignal.timeout(6000),
+    });
+    const loc = res.headers.get('location') || '';
+    const m = loc.match(/\/releases\/tag\/([^/?#]+)/i);
+    if (!m) return null;
+
+    const releaseTag = decodeURIComponent(m[1]).trim();
+    const latestVersion = normalizeVersion(releaseTag);
+    if (!latestVersion) return null;
+
+    const baseDl = `https://github.com/${cfg.repo}/releases/download/${encodeURIComponent(releaseTag)}`;
+    const inferredAssets: ReleaseAssetDto[] = [
+      {
+        name: `MochiDrop-${latestVersion}-Setup.exe`,
+        downloadUrl: `${baseDl}/MochiDrop-${latestVersion}-Setup.exe`,
+        sizeBytes: 0,
+      },
+      {
+        name: `MochiDrop-${latestVersion}-Portable.exe`,
+        downloadUrl: `${baseDl}/MochiDrop-${latestVersion}-Portable.exe`,
+        sizeBytes: 0,
+      },
+      {
+        name: `MochiDrop-${latestVersion}-arm64.dmg`,
+        downloadUrl: `${baseDl}/MochiDrop-${latestVersion}-arm64.dmg`,
+        sizeBytes: 0,
+      },
+      {
+        name: `MochiDrop-${latestVersion}-x64.dmg`,
+        downloadUrl: `${baseDl}/MochiDrop-${latestVersion}-x64.dmg`,
+        sizeBytes: 0,
+      },
+      {
+        name: `MochiDrop-${latestVersion}.AppImage`,
+        downloadUrl: `${baseDl}/MochiDrop-${latestVersion}.AppImage`,
+        sizeBytes: 0,
+      },
+    ];
+
+    const recommendedAsset = pickRecommendedAsset(inferredAssets, cfg.platform, cfg.arch);
+    const updateAvailable = compareSemver(latestVersion, cfg.currentVersion) > 0;
+
+    return {
+      currentVersion: cfg.currentVersion,
+      latestVersion,
+      updateAvailable,
+      repo: cfg.repo,
+      releaseName: `MochiDrop Desktop ${releaseTag}`,
+      releaseTag,
+      releaseNotes: '',
+      publishedAt: null,
+      releaseUrl: `https://github.com/${cfg.repo}/releases/tag/${encodeURIComponent(releaseTag)}`,
+      isDesktopApp: cfg.isDesktopApp,
+      platform: cfg.platform,
+      arch: cfg.arch,
+      recommendedAsset,
+      allAssets: inferredAssets,
+      checkedAt: Date.now(),
+      error: null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function checkForGithubUpdate(force = false): Promise<UpdateCheckResultDto> {
   const now = Date.now();
   if (!force && cachedCheck && now - cachedCheck.checkedAt < CHECK_CACHE_MS) {
@@ -242,7 +323,11 @@ export async function checkForGithubUpdate(force = false): Promise<UpdateCheckRe
         Accept: 'application/vnd.github+json',
         'User-Agent': `MochiDrop/${cfg.currentVersion}`,
         'X-GitHub-Api-Version': '2022-11-28',
+        'Cache-Control': 'no-cache',
       };
+      if (cachedEtag && cachedCheck) {
+        headers['If-None-Match'] = cachedEtag;
+      }
       const token = process.env.GITHUB_TOKEN?.trim();
       if (token) {
         headers.Authorization = `Bearer ${token}`;
@@ -254,6 +339,20 @@ export async function checkForGithubUpdate(force = false): Promise<UpdateCheckRe
         signal: AbortSignal.timeout(8000),
       });
 
+      // 304 Not Modified: GitHub confirmed latest release hasn't changed (costs 0 API rate limit!)
+      if (res.status === 304 && cachedCheck) {
+        cachedCheck = {
+          ...cachedCheck,
+          currentVersion: cfg.currentVersion,
+          updateAvailable:
+            Boolean(cachedCheck.latestVersion) &&
+            compareSemver(cachedCheck.latestVersion, cfg.currentVersion) > 0,
+          checkedAt: Date.now(),
+          error: null,
+        };
+        return cachedCheck;
+      }
+
       if (res.status === 404) {
         cachedCheck = {
           ...fallback,
@@ -263,12 +362,26 @@ export async function checkForGithubUpdate(force = false): Promise<UpdateCheckRe
         return cachedCheck;
       }
 
+      // If GitHub REST API is rate-limited (403/429), fall back to /releases/latest redirect check
+      if (res.status === 403 || res.status === 429) {
+        const redirectResult = await checkGithubLatestViaRedirect(cfg);
+        if (redirectResult) {
+          cachedCheck = redirectResult;
+          return redirectResult;
+        }
+      }
+
       if (!res.ok) {
         return {
           ...fallback,
           checkedAt: Date.now(),
           error: `GitHub Releases check returned HTTP ${res.status}.`,
         };
+      }
+
+      const newEtag = res.headers.get('etag');
+      if (newEtag) {
+        cachedEtag = newEtag;
       }
 
       const data = (await res.json()) as {
@@ -333,6 +446,11 @@ export async function checkForGithubUpdate(force = false): Promise<UpdateCheckRe
       cachedCheck = result;
       return result;
     } catch (err) {
+      const redirectResult = await checkGithubLatestViaRedirect(cfg);
+      if (redirectResult) {
+        cachedCheck = redirectResult;
+        return redirectResult;
+      }
       return {
         ...fallback,
         checkedAt: Date.now(),
